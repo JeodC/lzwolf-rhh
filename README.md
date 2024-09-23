@@ -37,6 +37,18 @@ LZWolf supports features not necessarily present in the official ECWolf project.
 * Unrestricted map size. (Although technical limits restrict GAMEMAPS format to 181x181.)
 * Uses scripting formats and data formats similar to those of ZDoom.
     * Doom editing utilities work with ECWolf. (Except for levels)
+    
+## Compiling
+```
+git clone https://github.com/JeodC/pm-lzwolf
+cd pm-lzwolf
+mkdir build && cd build
+cmake ..
+make
+strip lzwolf
+```
+
+Retrieve binaries `lzwolf` and `lzwolf.pk3`.
 
 ## Mod Compatibility
 
