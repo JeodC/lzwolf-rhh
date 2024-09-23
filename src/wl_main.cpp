@@ -108,7 +108,7 @@ fixed    yaspect;
 int32_t  heightnumerator;
 
 
-void    Quit (const char *error,...);
+[[noreturn]] void    Quit (const char *error,...);
 
 bool	startgame;
 bool	loadedgame;
@@ -153,6 +153,10 @@ void NewGame (int difficulty, const FString &map, bool displayBriefing, const Cl
 	gamestate.mapname[8] = 0;
 	gamestate.playerClass = playerClass;
 	levelInfo = &LevelInfo::Find(map);
+
+#ifdef USE_GPL
+	bibendovsky::newgame_initialize();
+#endif
 
 	if(displayBriefing)
 		EnterText(levelInfo->Cluster);
@@ -410,6 +414,11 @@ static void InitGame()
 	G_ParseMapInfo(true);
 
 	//
+	// Gameinfo provides game language for the language system
+	//
+	language.SetGameLanguage(gameinfo.GameLanguage);
+
+	//
 	// Init texture manager
 	//
 
@@ -631,7 +640,7 @@ void NewViewSize (int width, unsigned int scrWidth, unsigned int scrHeight)
 ==========================
 */
 
-void Quit (const char *errorStr, ...)
+[[noreturn]] void Quit (const char *errorStr, ...)
 {
 #ifdef NOTYET
 	byte *screen;
@@ -691,6 +700,7 @@ void Quit (const char *errorStr, ...)
 #endif
 	}
 
+	I_ShutdownGraphics();
 	exit(0);
 }
 
@@ -786,6 +796,33 @@ static void NonShareware (void)
 	IN_Ack ();
 }
 
+/*
+==================
+=
+= AuthorCredit
+=
+==================
+*/
+
+static void AuthorCredit (void)
+{
+	if(gameinfo.AuthorCreditPic.IsEmpty())
+		return;
+
+	//VW_FadeOut ();
+	//
+	VWB_Clear(0, 0, 0, screenWidth, screenHeight);
+
+	FTexture *tex = TexMan(gameinfo.AuthorCreditPic);
+	VWB_DrawGraphic(tex, 0, 0, 320, 200);
+	VW_UpdateScreen ();
+
+	VW_FadeIn ();
+	IN_UserInput (TICRATE * 7);
+
+	VW_FadeOut ();
+}
+
 //===========================================================================
 
 
@@ -819,7 +856,10 @@ static void DemoLoop()
 	StartCPMusic(gameinfo.TitleMusic);
 
 	if (!param_nowait)
+	{
 		PG13 ();
+		AuthorCredit ();
+	}
 
 	IntermissionInfo *demoLoop = IntermissionInfo::Find("DemoLoop");
 	bool gotoMenu = false;

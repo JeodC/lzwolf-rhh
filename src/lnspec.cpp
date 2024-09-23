@@ -101,6 +101,17 @@ LineSpecialFunction Specials::LookupFunction(LineSpecials function)
 
 	return lnspecFunctions[function];
 }
+const char* Specials::LookupFunctionName(LineSpecials function)
+{
+	const LineSpecialMeta *func = lnspecMeta;
+	do
+	{
+		if(func->num == function)
+			return func->name;
+	}
+	while((++func)->name != NULL);
+	return NULL;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -124,6 +135,8 @@ class EVDoor : public Thinker
 			sndseq = NULL;
 
 			spot->slideStyle = style;
+			if(spot->tile->slideStyle != 0)
+				spot->slideStyle = spot->tile->slideStyle;
 			if(spot->slideAmount[direction] == 0 && spot->slideAmount[direction+2] == 0)
 				ChangeState(Opening);
 			else
@@ -760,7 +773,7 @@ class EVPushwall : public Thinker
 			while(iter.Next())
 			{
 				AActor *actor = iter;
-				if((actor->flags&FL_ISMONSTER) || actor->player)
+				if((actor->flags&(FL_ISMONSTER|FL_SOLID)) || actor->player)
 				{
 					if(actor->tilex+dirdeltax[actor->dir] == movex &&
 						actor->tiley+dirdeltay[actor->dir] == movey)
@@ -891,9 +904,16 @@ static int DoPushwall(MapSpot spot, MapTrigger::Side direction, const int *args,
 
 	if(args[0] == 0)
 	{
-		if(spot->thinker || !spot->tile || (spot->GetAdjacent(MapTile::Side(dir))->tile && !nostop))
+		auto moveTo = spot->GetAdjacent(MapTile::Side(dir));
+		if(spot->thinker || !spot->tile || !moveTo || (moveTo->tile && !nostop))
 		{
 			return 0;
+		}
+
+		if(!nostop && !EVPushwall::CheckSpotFree(moveTo))
+		{
+			SD_PlaySound("player/usefail");
+			return 2; // do not clear active flag
 		}
 
 		new EVPushwall(spot, args[1], dir, args[3], nostop);
@@ -904,7 +924,13 @@ static int DoPushwall(MapSpot spot, MapTrigger::Side direction, const int *args,
 		MapSpot pwall = NULL;
 		while((pwall = map->GetSpotByTag(args[0], pwall)))
 		{
-			if(pwall->thinker || !pwall->tile || (pwall->GetAdjacent(MapTile::Side(dir))->tile && !nostop))
+			auto moveTo = pwall->GetAdjacent(MapTile::Side(dir));
+			if(pwall->thinker || !pwall->tile || !moveTo || (moveTo->tile && !nostop))
+			{
+				continue;
+			}
+
+			if(!nostop && !EVPushwall::CheckSpotFree(moveTo))
 			{
 				continue;
 			}
@@ -937,6 +963,15 @@ FUNC(Exit_Normal)
 		if(control[activator->player - players].buttonheld[bt_use])
 			return 0;
 		control[activator->player - players].buttonheld[bt_use] = true;
+	}
+
+	if(activator->player || (activator->flags & FL_REQUIREKEYS))
+	{
+		if(args[3] != 0)
+		{
+			if(!P_CheckKeys(activator, args[3], false))
+				return 0;
+		}
 	}
 
 	playstate = ex_completed;
@@ -1147,6 +1182,8 @@ FUNC(Teleport_Relative)
 		TELEPORT_Center = 4, // Center onto destination tile
 		TELEPORT_AbsoluteAngle = 8, // Set absolute angle instead of relative
 		TELEPORT_ActivationAngle = 0x10, // Face the activation point (typically used with AbsoluteAngle)
+		TELEPORT_InvertYFrac = 0x20, // Invert yfrac
+		TELEPORT_AbsolutePosition = 0x40, // Set absolute position instead of relative
 	};
 
 	if(!spot)
@@ -1174,8 +1211,20 @@ FUNC(Teleport_Relative)
 	fixed y = activator->y + ((dest->GetY() - spot->GetY())<<FRACBITS);
 	if((args[2] & TELEPORT_Center))
 	{
-		x = (activator->x&0xFFFF0000)|0x8000;
-		y = (activator->y&0xFFFF0000)|0x8000;
+		if((args[2] & TELEPORT_AbsolutePosition))
+		{
+			x = (dest->GetX()<<FRACBITS)|0x8000;
+			y = (dest->GetY()<<FRACBITS)|0x8000;
+		}
+		else
+		{
+			x = (x&0xFFFF0000)|0x8000;
+			y = (y&0xFFFF0000)|0x8000;
+		}
+	}
+	if((args[2] & TELEPORT_InvertYFrac))
+	{
+		y = (y&0xFFFF0000)|(0xFFFF-(y&0xFFFF));
 	}
 
 	angle_t angle = (args[1]<<24) +
@@ -1231,4 +1280,30 @@ FUNC(Trigger_ThingSpecial)
 	}
 
 	return ret;
+}
+
+FUNC(Operate_Concession)
+{
+	TicCmd_t &cmd = control[ConsolePlayer];
+	if(!cmd.buttonheld[bt_use])
+	{
+#ifdef USE_GPL
+		map->OperateConcession(args[1]);
+#endif
+		return 1;
+	}
+	return 0;
+}
+
+FUNC(Operate_WallSwitch)
+{
+	TicCmd_t &cmd = control[ConsolePlayer];
+	if(!cmd.buttonheld[bt_use])
+	{
+#ifdef USE_GPL
+		map->ActivateWallSwitch(args[1]);
+#endif
+		return 1;
+	}
+	return 0;
 }

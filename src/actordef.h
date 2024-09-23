@@ -103,6 +103,7 @@ class Frame
 		int			duration;
 		unsigned	randDuration;
 		bool		fullbright;
+		bool		zonebright;
 		fixed_t		offsetX;
 		fixed_t		offsetY;
 		class ActionCall
@@ -148,6 +149,11 @@ public:
 	T *operator[] (unsigned int index)
 	{
 		return objects[index];
+	}
+
+	unsigned int Size() const
+	{
+		return objects.Size();
 	}
 private:
 	TArray<T*>	objects;

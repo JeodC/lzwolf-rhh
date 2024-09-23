@@ -1,5 +1,6 @@
 // WL_DRAW.C
 
+#include <algorithm>
 #include "wl_def.h"
 #include "id_sd.h"
 #include "id_in.h"
@@ -29,6 +30,7 @@
 #include "thingdef/thingdef.h"
 #include "c_console.h"
 #include "wl_menu.h"
+#include "lw_vec.h"
 
 /*
 =============================================================================
@@ -55,9 +57,15 @@
 namespace Shading
 {
 	void PopulateHalos (void);
+
+	int LightForIntercept (fixed xintercept, fixed yintercept, const ClassDef* &littype);
+
+	const BYTE *GetCMapStart (const ClassDef *littype);
+
+	bool GetFullBrightInhibit (const ClassDef *littype);
 }
 
-void DrawFloorAndCeiling(byte *vbuf, unsigned vbufPitch, int min_wallheight);
+void DrawFloorAndCeiling(byte *vbuf, unsigned vbufPitch, TWallHeight min_wallheight);
 
 const RatioInformation AspectCorrection[] =
 {
@@ -75,15 +83,17 @@ unsigned vbufPitch = 0;
 
 int32_t	lasttimecount;
 int32_t	frameon;
+int32_t	moveobj_frameon;
+int32_t	projectile_frameon;
 bool	fpscounter;
 int		r_extralight;
 
 int fps_frames=0, fps_time=0, fps=0;
 
-TUniquePtr<int[]> wallheight;
-int min_wallheight;
+TUniquePtr<TWallHeight[]> wallheight;
+TWallHeight min_wallheight;
 
-TUniquePtr<int[]> skywallheight;
+TUniquePtr<TWallHeight[]> skywallheight;
 
 //
 // math tables
@@ -101,6 +111,7 @@ angle_t viewangle;
 fixed   viewsin,viewcos;
 int viewshift = 0;
 fixed viewz = 32;
+fixed viewcamz[2] = {0,0};
 
 fixed gLevelVisibility = VISIBILITY_DEFAULT;
 fixed gLevelMaxLightVis = MAXLIGHTVIS_DEFAULT;
@@ -255,13 +266,20 @@ void TransformActor (AActor *ob)
 ====================
 */
 
-int CalcHeight()
+TWallHeight CalcHeight()
 {
 	fixed z = FixedMul(xintercept - viewx, viewcos)
 		- FixedMul(yintercept - viewy, viewsin);
 	if(z < MINDIST) z = MINDIST;
-	int height = (heightnumerator << 8) / z;
-	if(height < min_wallheight) min_wallheight = height;
+	TWallHeight height;
+	height[0] = (heightnumerator << 8) / z;
+	if(height[0] < min_wallheight[0]) min_wallheight[0] = height[0];
+	for(int i = 1; i < 3; i++)
+	{
+		const int bot = ((i-1)*2 - 1);
+		height[i] = WallMidY (height[0], bot);
+		if(height[i] < min_wallheight[i]) min_wallheight[i] = height[i];
+	}
 	return height;
 }
 
@@ -278,47 +296,94 @@ int CalcHeight()
 const byte *postsource;
 int postx;
 int32_t postshadex, postshadey;
+bool postbright, postdecal, poststarsky;
+byte postdecalcolor = 187; // slade will not set the right color for this; its annoying but its true
+bool postneedprec = false;
 
-// from wl_floorceiling.cpp
-namespace Shading
+struct StandardScalePost
 {
-	int LightForIntercept (fixed xintercept, fixed yintercept);
-}
+	static inline void WritePix(int yendoffs, byte col)
+	{
+		vbuf[yendoffs] = col;
+	}
 
-void ScalePost()
+	static inline byte ReadColor(const byte *curshades, int yw)
+	{
+		return curshades[postsource[yw]];
+	}
+};
+
+struct DecalScalePost
+{
+	static inline void WritePix(int yendoffs, byte col)
+	{
+		if(col != postdecalcolor)
+			vbuf[yendoffs] = col;
+	}
+
+	static inline byte ReadColor(const byte *curshades, int yw)
+	{
+		auto col = postsource[yw];
+		return (col == postdecalcolor ? postdecalcolor : curshades[col]);
+	}
+};
+
+template<typename Algo>
+void RunScalePost()
 {
 	if(postsource == NULL)
 		return;
 
 	int ywcount, yoffs, yw, yd, yendoffs;
 	byte col;
+	fixed halftexheight;
+	int wraptexcoord, truncateprec;
 
-	const int shade = LIGHT2SHADE(gLevelLight + r_extralight + Shading::LightForIntercept (postshadex, postshadey));
-	const int tz = FixedMul(r_depthvisibility<<8, wallheight[postx]);
-	BYTE *curshades = &NormalLight.Maps[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+	if(postneedprec) // stacked tiles
+	{
+		wraptexcoord = (texyscale>>2)-1;
+		truncateprec = 0;
+	}
+	else // single tile (vanilla case)
+	{
+		wraptexcoord = 0;
+		truncateprec = 3;
+		// texyscale = 256 = 32*8 = (TEXTURESIZE/2)*8
+		// halftexheight works out to (TEXTURESIZE/2) as in vanilla
+	}
+	halftexheight = texyscale>>truncateprec;
 
-	ywcount = yd = wallheight[postx];
+	const ClassDef *littype = NULL;
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight + Shading::LightForIntercept (postshadex, postshadey, littype));
+	const int tz = FixedMul(r_depthvisibility<<8, wallheight[postx][0]);
+	const BYTE *curshades;
+	const BYTE *cmapstart = Shading::GetCMapStart (littype);
+	if(postbright && !Shading::GetFullBrightInhibit(littype))
+		curshades = cmapstart;
+	else
+		curshades = &cmapstart[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+
+	ywcount = yd = wallheight[postx][0]>>truncateprec;
 	if(yd <= 0)
 		yd = 100;
 
 	// Calculate starting and ending offsets
 	{
-		// ywcount can be large enough to cause an overflow if we don't reduce
-		// fixed point precision here
-		const int topoffset = ywcount*((viewz + fixed(map->GetPlane(0).depth<<FRACBITS))>>8)/(32<<(FRACBITS-5));
-		const int botoffset = ywcount*(viewz>>8)/(32<<(FRACBITS-5));
+		int ywcount = wallheight[postx][1]>>3;
+		int midy = (viewheight / 2) - ywcount;
 
-		yoffs = (viewheight / 2 - topoffset - viewshift) * vbufPitch;
+		yoffs = midy * vbufPitch;
 		if(yoffs < 0) yoffs = 0;
 		yoffs += postx;
 
-		yendoffs = viewheight / 2 - botoffset - 1 - viewshift;
+		ywcount = wallheight[postx][2]>>3;
+		yendoffs = (viewheight / 2) + ywcount;
 		yw=(texyscale>>2)-1;
 	}
 
 	while(yendoffs >= viewheight)
 	{
-		ywcount -= texyscale;
+		ywcount -= halftexheight;
 		while(ywcount <= 0)
 		{
 			ywcount += yd;
@@ -329,12 +394,12 @@ void ScalePost()
 	if(yw < 0)
 		yw = (texyscale>>2) - ((-yw) % (texyscale>>2));
 
-	col = curshades[postsource[yw]];
+	col = Algo::ReadColor(curshades, yw);
 	yendoffs = yendoffs * vbufPitch + postx;
 	while(yoffs <= yendoffs)
 	{
-		vbuf[yendoffs] = col;
-		ywcount -= texyscale;
+		Algo::WritePix(yendoffs, col);
+		ywcount -= halftexheight;
 		if(ywcount <= 0)
 		{
 			do
@@ -343,12 +408,76 @@ void ScalePost()
 				yw--;
 			}
 			while(ywcount <= 0);
-			if(yw < 0) yw = (texyscale>>2)-1;
-			col = curshades[postsource[yw]];
+			if(yw < 0) yw = wraptexcoord;
+			col = Algo::ReadColor(curshades, yw);
 		}
 		yendoffs -= vbufPitch;
 	}
 }
+
+void ScalePost()
+{
+	if(poststarsky)
+	{
+		// draw nothing when showsky is enabled and starsky is enabled
+	}
+	else if(postdecal)
+	{
+		RunScalePost<DecalScalePost>();
+	}
+	else
+	{
+		RunScalePost<StandardScalePost>();
+	}
+}
+
+/*
+===================
+=
+= Camz
+=
+===================
+*/
+
+inline fixed Camz (fixed height, int bot)
+{
+	unsigned int depth = map->GetPlane(0).depth;
+	if(bot < 0 && depth > 64)
+		height -= (fixed(depth-64)<<FRACBITS);
+	fixed camz = (height / 64) - (TILEGLOBAL / 2);
+	return camz;
+}
+
+
+/*
+===================
+=
+= WallMidY
+=
+===================
+*/
+
+int WallMidY (int ywcount, int bot)
+{
+	const fixed camz = viewcamz[(bot+1)>>1];
+	return ((TILEGLOBAL + (bot * camz * 2)) * ywcount)>>FRACBITS;
+}
+
+
+/*
+===================
+=
+= InvWallMidY
+=
+===================
+*/
+
+int InvWallMidY(int y, int bot)
+{
+	const fixed camz = viewcamz[(bot+1)>>1];
+	return ((FixedDiv((y<<FRACBITS), TILEGLOBAL + (bot * camz * 2)))>>FRACBITS) + 1;
+}
+
 
 void GlobalScalePost(byte *vidbuf, unsigned pitch)
 {
@@ -420,6 +549,8 @@ void HitVertWall (void)
 		texture = (FRACUNIT - texture)&(FRACUNIT-1);
 		xintercept += TILEGLOBAL;
 	}
+	if(tilehit->tile->textureFlip)
+		texture = (FRACUNIT - 1 - texture);
 
 	// nudge for zone lighting
 	postshadex = xintercept-(int32_t)xtilestep;
@@ -431,9 +562,12 @@ void HitVertWall (void)
 
 		ScalePost();
 		wallheight[pixx] = CalcHeight();
-		skywallheight[pixx] = (tilehit->tile->showSky ? 0 : wallheight[pixx]);
+		skywallheight[pixx] = (tilehit->tile->showSky ? TWallHeight{} : wallheight[pixx]);
 		if(postsource)
 			postsource+=(texture-lasttexture)*texheight/texxscale;
+		postbright = tilehit->tile->bright;
+		postdecal = tilehit->tile->decal;
+		poststarsky = (tilehit->tile->showSky && levelInfo->StarSkyEnabled());
 		postx=pixx;
 		lasttexture=texture;
 		return;
@@ -445,7 +579,10 @@ void HitVertWall (void)
 	lastintercept=xtile;
 	lasttilehit=tilehit;
 	wallheight[pixx] = CalcHeight();
-	skywallheight[pixx] = (tilehit->tile->showSky ? 0 : wallheight[pixx]);
+	skywallheight[pixx] = (tilehit->tile->showSky ? TWallHeight{} : wallheight[pixx]);
+	postbright = tilehit->tile->bright;
+	postdecal = tilehit->tile->decal;
+	poststarsky = (tilehit->tile->showSky && levelInfo->StarSkyEnabled());
 	postx = pixx;
 	FTexture *source = NULL;
 
@@ -500,6 +637,8 @@ void HitHorizWall (void)
 		else
 			texture = (FRACUNIT - texture)&(FRACUNIT-1);
 	}
+	if(tilehit->tile->textureFlip)
+		texture = (FRACUNIT - 1 - texture);
 
 	// nudge for zone lighting
 	postshadex = xintercept;
@@ -511,9 +650,12 @@ void HitHorizWall (void)
 
 		ScalePost();
 		wallheight[pixx] = CalcHeight();
-		skywallheight[pixx] = (tilehit->tile->showSky ? 0 : wallheight[pixx]);
+		skywallheight[pixx] = (tilehit->tile->showSky ? TWallHeight{} : wallheight[pixx]);
 		if(postsource)
 			postsource+=(texture-lasttexture)*texheight/texxscale;
+		postbright = tilehit->tile->bright;
+		postdecal = tilehit->tile->decal;
+		poststarsky = (tilehit->tile->showSky && levelInfo->StarSkyEnabled());
 		postx=pixx;
 		lasttexture=texture;
 		return;
@@ -525,7 +667,10 @@ void HitHorizWall (void)
 	lastintercept=ytile;
 	lasttilehit=tilehit;
 	wallheight[pixx] = CalcHeight();
-	skywallheight[pixx] = (tilehit->tile->showSky ? 0 : wallheight[pixx]);
+	skywallheight[pixx] = (tilehit->tile->showSky ? TWallHeight{} : wallheight[pixx]);
+	postbright = tilehit->tile->bright;
+	postdecal = tilehit->tile->decal;
+	poststarsky = (tilehit->tile->showSky && levelInfo->StarSkyEnabled());
 	postx = pixx;
 	FTexture *source = NULL;
 
@@ -576,6 +721,18 @@ unsigned int CalcRotate (AActor *ob)
 
 	angle = viewangle - ob->angle;
 
+	if(ob->TwoSidedRotate.first)
+	{
+		const auto x = players[ConsolePlayer].camera->x;
+		const auto y = players[ConsolePlayer].camera->y;
+		const auto v = lwlib::vec2f(FIXED2FLOAT(x - ob->x),
+				FIXED2FLOAT(y - ob->y));
+		const auto obj_n = lwlib::vec2f(FIXED2FLOAT(finecosine[ob->angle>>ANGLETOFINESHIFT]),
+				-FIXED2FLOAT(finesine[ob->angle>>ANGLETOFINESHIFT]));
+		const auto prod = vec_dot(v, obj_n);
+		return (ob->TwoSidedRotate.second * 2) + (prod > 0 ? 0 : 1);
+	}
+
 	angle+= ANGLE_180 + ANGLE_45/2;
 
 	return angle/ANGLE_45;
@@ -591,7 +748,7 @@ unsigned int CalcRotate (AActor *ob)
 =====================
 */
 
-#define MAXVISABLE 250
+#define MAXVISABLE 500
 
 typedef struct
 {
@@ -746,6 +903,12 @@ void AsmRefresh()
 	longword xpartial=0,ypartial=0;
 	MapSpot focalspot = map->GetSpot(focaltx, focalty, 0);
 	bool playerInPushwallBackTile = focalspot->pushAmount != 0;
+
+	if(gameinfo.walldecalcolor >= 256)
+		postdecalcolor = (byte)(gameinfo.walldecalcolor&0xff);
+
+	// need extra precision when drawing stacked tiles
+	postneedprec = (map->GetPlane(0).depth > 64);
 
 	for(pixx=0;pixx<viewwidth;pixx++)
 	{
@@ -1190,16 +1353,53 @@ void WallRefresh (void)
 	ypartialdown = viewy&(TILEGLOBAL-1);
 	ypartialup = TILEGLOBAL-ypartialdown;
 
-	min_wallheight = viewheight;
+	min_wallheight = TWallHeight{viewheight,viewheight,viewheight};
 	lastside = -1;                  // the first pixel is on a new wall
 	viewshift = FixedMul(focallengthy, finetangent[(ANGLE_180+players[ConsolePlayer].camera->pitch)>>ANGLETOFINESHIFT]);
 
 	
-	angle_t bobangle = ((gamestate.TimeCount<<13)/(20*TICRATE/35)) & FINEMASK;
+	fixed bobspeed = players[ConsolePlayer].mo->GetClass()->Meta.GetMetaFixed(APMETA_MoveBobSpeed);
+	if (bobspeed == 0)
+		bobspeed = FRACUNIT;
+	angle_t bobangle = ((gamestate.TimeCount<<13)/((20*FRACUNIT/bobspeed)*TICRATE/35)) & FINEMASK;
 	const fixed playerMovebob = players[ConsolePlayer].mo->GetClass()->Meta.GetMetaFixed(APMETA_MoveBob);
 	fixed curbob = gamestate.victoryflag ? 0 : FixedMul(FixedMul(players[ConsolePlayer].bob, playerMovebob)>>1, finesine[bobangle]);
+	//fprintf(stderr, "sinebobangle=%.2f,bob=%.2f,playermovebob=%.2f,curbob=%.2f\n", FIXED2FLOAT(finesine[bobangle]),FIXED2FLOAT(players[ConsolePlayer].bob), FIXED2FLOAT(playerMovebob), FIXED2FLOAT(curbob));
 
-	viewz = curbob - players[ConsolePlayer].mo->viewheight;
+	// simulating foot step or splash effect
+	fixed nextbob = gamestate.victoryflag ? 0 :
+		FixedMul(players[ConsolePlayer].bob>>1, finesine[bobangle]);
+	auto& lastbob = players[ConsolePlayer].lastbob;
+	//fprintf(stderr, "nextbob=%.2f, bobangle=%d\n", FIXED2FLOAT(nextbob), (int)bobangle);
+	lastbob.step = false;
+	if (lastbob.dir > 0 && nextbob < lastbob.value && nextbob > TILEGLOBAL &&
+			!lastbob.inhibitstep)
+	{
+		//fprintf(stderr, "step\n");
+		lastbob.step = true;
+		lastbob.inhibitstep = true; // inhibit until bob goes positive again
+	}
+	if (nextbob - lastbob.value > 0)
+	{
+		lastbob.dir = 1;
+	}
+	else if (nextbob - lastbob.value < 0)
+	{
+		lastbob.dir = -1;
+	}
+	else
+		lastbob.dir = 0;
+	lastbob.value = nextbob;
+	if (nextbob < 0)
+	{
+		lastbob.inhibitstep = false;
+	}
+
+	fixed height = players[ConsolePlayer].mo->viewheight;
+	viewz = curbob - height;
+
+	viewcamz[0] = Camz (height - curbob, -1);
+	viewcamz[1] = Camz (height - curbob, 1);
 
 	AsmRefresh();
 	ScalePost ();                   // no more optimization on last post
@@ -1240,11 +1440,17 @@ void R_RenderView()
 	if (levelInfo->Atmos[3])
 		DrawHighQualityStarSky(vbuf, vbufPitch);
 
+	if (levelInfo->ParallaxDecals && levelInfo->ParallaxSky.Size() > 0)
+	{
+		std::fill(skywallheight.Get(), skywallheight.Get() + SCREENWIDTH, TWallHeight{});
+		DrawParallax(vbuf, vbufPitch);
+	}
+
 	Shading::PopulateHalos ();
 
 	WallRefresh ();
 
-	if (levelInfo->ParallaxSky.Size() > 0)
+	if (!levelInfo->ParallaxDecals && levelInfo->ParallaxSky.Size() > 0)
 		DrawParallax(vbuf, vbufPitch);
 #if defined(USE_FEATUREFLAGS) && defined(USE_CLOUDSKY)
 	if(GetFeatureFlags() & FF_CLOUDSKY)
@@ -1258,13 +1464,13 @@ void R_RenderView()
 	DrawScaleds();                  // draw scaled stuff
 
 	if (levelInfo->Atmos[1])
-		DrawRain(vbuf, vbufPitch);
-	if (levelInfo->Atmos[2])
-		DrawSnow(vbuf, vbufPitch);
+		DrawRain(vbuf, vbufPitch, 0, 0);
+	if (levelInfo->SnowEnabled())
+		DrawSnow(vbuf, vbufPitch, 0, 0);
 
 	DrawPlayerWeapon ();    // draw player's hands
 
-	if((control[ConsolePlayer].buttonstate[bt_showstatusbar] || control[ConsolePlayer].buttonheld[bt_showstatusbar]) && viewsize == 21)
+	if((StatusBar->ShowWithoutKey() || control[ConsolePlayer].buttonstate[bt_showstatusbar] || control[ConsolePlayer].buttonheld[bt_showstatusbar]) && viewsize == 21)
 	{
 		ingame = false;
 		StatusBar->DrawStatusBar();

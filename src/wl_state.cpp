@@ -1,6 +1,7 @@
 // WL_STATE.C
 
 #include <sstream>
+#include <map>
 #include "wl_def.h"
 #include "id_ca.h"
 #include "id_sd.h"
@@ -15,6 +16,9 @@
 #include "wl_net.h"
 #include "wl_play.h"
 #include "wl_state.h"
+#include "wl_draw.h"
+#include "wl_framedata.h"
+#include "am_map.h"
 #include "templates.h"
 
 /*
@@ -51,10 +55,13 @@ static const dirtype diagonal[9][9] =
 				{nodir,nodir,nodir,nodir,nodir,nodir,nodir,nodir,nodir}
 };
 
-bool TryWalk (AActor *ob);
 bool MoveObj (AActor *ob, int32_t move);
 
 static void FirstSighting (AActor *ob, const Frame *state);
+int ApplyMobjDamageFactor(int damage, const FName &damagetype,
+		const DmgFactors *factors);
+
+EXTERN_CVAR (Bool, notargetmode)
 
 /*
 =============================================================================
@@ -91,7 +98,8 @@ bool TrySpot(AActor *ob, MapSpot spot)
 
 		// Players need not be checked
 		if(iter != ob && !iter->player && ( (iter->flags & FL_SOLID) ||
-			(iter->extraflags & FL_ENEMYSOLID) ) &&
+			( !(ob->extraflags & FL_IGNOREENEMYSOLID) &&
+			  (iter->extraflags & FL_ENEMYSOLID) ) ) &&
 			static_cast<unsigned int>(iter->tilex+dirdeltax[offsetDir]) == x &&
 			static_cast<unsigned int>(iter->tiley+dirdeltay[offsetDir]) == y)
 			return false;
@@ -124,16 +132,24 @@ bool TrySpot(AActor *ob, MapSpot spot)
 static inline short CheckSide(AActor *ob, unsigned int x, unsigned int y, MapTrigger::Side dir, bool canuse)
 {
 	MapSpot spot = map->GetSpot(x, y, 0);
-	if(spot->tile)
+	if(spot->amFlags & AutoMap::AMF_FailCheckSide)
+	{
+		return 0;
+	}
+	else if(spot->tile)
 	{
 		if(canuse)
 		{
 			bool used = false;
 			for(unsigned int i = 0;i < spot->triggers.Size();++i)
 			{
-				if(spot->triggers[i].monsterUse && spot->triggers[i].activate[dir])
+				MapTrigger &trigger = spot->triggers[i];
+				if(trigger.monsterUse &&
+						(trigger.monsterUseFilter == 0 ||
+						 trigger.monsterUseFilter == ob->UseTriggerFilterKey) && 
+						trigger.activate[dir])
 				{
-					if(map->ActivateTrigger(spot->triggers[i], dir, ob))
+					if(map->ActivateTrigger(trigger, dir, ob))
 						used = true;
 				}
 			}
@@ -155,7 +171,7 @@ static inline short CheckSide(AActor *ob, unsigned int x, unsigned int y, MapTri
 #define CHECKSIDE(x,y,dir) \
 { \
 	short _cs; \
-	if((_cs = CheckSide(ob, x, y, dir, !!(ob->flags & FL_CANUSEWALLS))) >= 0) \
+	if((_cs = CheckSide(ob, x, y, dir, !!(ob->flags & FL_CANUSEWALLS) && canuse)) >= 0) \
 		return _cs != 0; \
 }
 #define CHECKDIAG(x,y,dir) \
@@ -167,7 +183,7 @@ static inline short CheckSide(AActor *ob, unsigned int x, unsigned int y, MapTri
 
 
 
-bool TryWalk (AActor *ob)
+bool TryWalk (AActor *ob, bool canuse)
 {
 	word zonex = ob->tilex;
 	word zoney = ob->tiley;
@@ -725,13 +741,24 @@ bool MoveObj (AActor *ob, int32_t move)
 	}
 	ob->distance -=move;
 
-	// Check for touching objects
-	for(AActor::Iterator iter = AActor::GetIterator().Next();iter;)
-	{
-		AActor *check = iter;
-		iter.Next();
+	static FrameData framedata;
 
-		if(check == ob || (check->flags & FL_SOLID))
+	if(frameon != moveobj_frameon)
+	{
+		moveobj_frameon = frameon;
+
+		framedata.InitXActors([](AActor *check) {
+				return (check->flags & FL_SOLID) != 0;
+			} );
+	}
+
+	const auto max_r = framedata.max_radius + ob->radius;
+	for(auto it = framedata.xactors.lower_bound(ob->x - max_r);
+			it != framedata.xactors.upper_bound(ob->x + max_r); ++it)
+	{
+		auto check = it->second;
+
+		if(check == ob)
 			continue;
 
 		fixed r = check->radius + ob->radius;
@@ -803,7 +830,7 @@ void DamageActor (AActor *ob, AActor *attacker, unsigned damage, const ClassDef 
 	}
 
 	if (!damageinv || !damageinv->silent)
-		madenoise = true;
+		madenoise = 1;
 
 	//
 	// do double damage if shooting a non attack mode actor
@@ -818,11 +845,26 @@ void DamageActor (AActor *ob, AActor *attacker, unsigned damage, const ClassDef 
 			return;
 	}
 
+	if (damage > 0)
+	{
+		damage = FixedMul(damage, ob->DamageFactor);
+		if (damage > 0 && damagetype != nullptr)
+		{
+			damage = ApplyMobjDamageFactor(damage, damagetype->GetName(),
+					ob->GetClass()->DamageFactors);
+		}
+	}
+
 	NetDPrintf("%s %d points\n", __FUNCTION__, FixedMul(damage, gamestate.difficulty->PlayerDamageFactor));
 	ob->health -= FixedMul(damage, gamestate.difficulty->PlayerDamageFactor);
-	// Ensure that we're targetting a player for now.
-	if(attacker && attacker->player)
+
+	// Target the attacker
+	if(attacker && attacker != ob && 
+			(attacker->player || (attacker->flags & FL_SHOOTABLE)) &&
+			CheckIsEnemyByFaction(ob, attacker))
+	{
 		ob->target = attacker;
+	}
 
 	if (ob->health<=0)
 	{
@@ -857,6 +899,29 @@ void DamageActor (AActor *ob, AActor *attacker, unsigned damage, const ClassDef 
 		if (painstate)
 			ob->SetState(painstate);
 	}
+}
+
+/*
+===================
+=
+= ApplyMobjDamageFactor
+=
+===================
+*/
+
+int ApplyMobjDamageFactor(int damage, const FName &damagetype,
+		const DmgFactors *factors)
+{
+	if (factors != nullptr)
+	{
+		auto p_factor = factors->CheckFactor(damagetype.GetChars());
+		if (p_factor)
+		{
+			return FixedMul(damage, *p_factor);
+		}
+	}
+	
+	return damage;
 }
 
 /*
@@ -974,7 +1039,11 @@ bool CheckLine (AActor *ob, AActor *ob2)
 
 			MapSpot spot = map->GetSpot(x, y, 0);
 			
-			if (!spot->tile)
+			if (spot->amFlags & AutoMap::AMF_FailCheckLine)
+			{
+				return false;
+			}
+			else if (!spot->tile)
 			{
 				if (CheckAdjacentTileBlockage(x, y, lastx, lasty))
 					return false;
@@ -1040,7 +1109,11 @@ bool CheckLine (AActor *ob, AActor *ob2)
 
 			MapSpot spot = map->GetSpot(x, y, 0);
 
-			if (!spot->tile)
+			if (spot->amFlags & AutoMap::AMF_FailCheckLine)
+			{
+				return false;
+			}
+			else if (!spot->tile)
 			{
 				if (CheckAdjacentTileBlockage(x, y, lastx, lasty))
 					return false;
@@ -1086,10 +1159,16 @@ bool CheckLine (AActor *ob, AActor *ob2)
 
 static bool CheckSightTo (AActor *ob, AActor *target, double minseedist, double maxseedist, double maxheardist, double fov)
 {
-	bool heardnoise = madenoise;
+	bool heardnoise = (madenoise > 0);
+	bool forcenoise = (madenoise >= 2);
 
 	// Check if we can hear the player's noise
 	if (heardnoise && !map->CheckLink(ob->GetZone(), target->GetZone(), true))
+		heardnoise = false;
+
+	// Disregard noise if not connected to player
+	AActor *playerob = players[0].mo;
+	if (heardnoise && target != playerob && !map->CheckLink(ob->GetZone(), playerob->GetZone(), true))
 		heardnoise = false;
 
 	//
@@ -1100,15 +1179,17 @@ static bool CheckSightTo (AActor *ob, AActor *target, double minseedist, double 
 	uint32_t distance = MAX(abs(deltax), abs(deltay))*64;
 
 	if (!(ob->flags & FL_AMBUSH) && heardnoise &&
-		(maxheardist < 0.00001 ||
-		distance < maxheardist))
+		(forcenoise || maxheardist < 0.00001 ||
+		FIXED2FLOAT(distance/64) < maxheardist))
 		return true;
 
+	if((ob->extraflags & FL_FRIENDLY) != 0)
+		return false;
 	if (minseedist > 0.00001 &&
-		distance < minseedist)
+		FIXED2FLOAT(distance/64) < minseedist)
 		return false;
 	if (maxseedist > 0.00001 &&
-		distance > maxseedist)
+		FIXED2FLOAT(distance/64) > maxseedist)
 		return false;
 
 	if (distance < MINSIGHT)
@@ -1136,8 +1217,29 @@ static bool CheckSightTo (AActor *ob, AActor *target, double minseedist, double 
 	return CheckLine (ob, target);
 }
 
+/*
+================
+=
+= GetInventoryFaction
+=
+= Returns faction from given actor. The result can be overridden by actor inventory.
+=
+================
+*/
+const ClassDef *GetInventoryFaction (AActor *ob)
+{
+	for(AInventory *item = ob->inventory;item;item = item->inventory)
+	{
+		if(item->faction)
+			return item->faction;
+	}
+	return ob->faction;
+}
+
 bool CheckIsEnemyByFaction (AActor *ob, AActor *check)
 {
+	const auto faction = GetInventoryFaction (check);
+
 	typedef AActor::EnemyFactionList Li;
 	Li *li = ob->GetEnemyFactionList();
 	if (li)
@@ -1146,7 +1248,7 @@ bool CheckIsEnemyByFaction (AActor *ob, AActor *check)
 		do
 		{
 			Li::Iterator enemyFaction = item;
-			if (check->faction == enemyFaction->faction)
+			if (faction == enemyFaction->faction)
 			{
 				return true;
 			}
@@ -1164,7 +1266,9 @@ static AActor *CheckSight (AActor *ob, double minseedist, double maxseedist, dou
 		for(unsigned int i = 0;i < Net::InitVars.numPlayers;++i)
 		{
 			if(CheckSightTo(ob, players[i].mo, minseedist, maxseedist, maxheardist, fov))
+            {
 				return players[i].mo;
+            }
 		}
 	}
 	else
@@ -1274,6 +1378,7 @@ bool SightPlayer (AActor *ob, double minseedist, double maxseedist, double maxhe
 		{
 			ob->target = target;
 			ob->flags &= ~FL_AMBUSH;
+			ob->extraflags &= ~FL_FRIENDLY;
 
 			--ob->sighttime; // We need to somehow mark we started.
 			ob->sightrandom = 1; // Account for tic.

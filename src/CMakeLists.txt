@@ -1,4 +1,4 @@
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -68,6 +68,10 @@ if( ZD_CMAKE_COMPILER_IS_GNUCXX_COMPATIBLE )
 	endif()
 	set( CMAKE_CXX_FLAGS "-Wall -Wextra -Wno-unused -Wno-unused-parameter -Wno-missing-field-initializers ${CMAKE_CXX_FLAGS}" )
 endif()
+
+#SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pg")
+#SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pg")
+#SET(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -pg")
 
 if(WIN32)
 	set(NO_GTK ON)
@@ -161,9 +165,13 @@ list(APPEND HEADER_FILES ${CMAKE_CURRENT_BINARY_DIR}/versiondefs.h)
 
 set(SOURCE_FILES
 	g_blake/a_smartanim.cpp
+	g_blake/a_barrier.cpp
 	g_blake/blake_sbar.cpp
+	g_blake/blakeaog_sbar.cpp
+	g_blake/bibendovsky.cpp
 	g_shared/a_armor.cpp
 	g_shared/a_action.cpp
+	g_shared/a_ambient.cpp
 	g_shared/a_deathcam.cpp
 	g_shared/a_inventory.cpp
 	g_shared/a_keys.cpp
@@ -338,6 +346,7 @@ target_include_directories(lzwolf PRIVATE
 	${LZMA_INCLUDE_DIR}
 	${LZWolf_SOURCE_DIR}/deps/gdtoa
 	${CMAKE_BINARY_DIR}/deps/gdtoa
+	${LZWolf_SOURCE_DIR}/deps/eigen
 )
 
 set_target_properties(lzwolf PROPERTIES

@@ -21,6 +21,7 @@
 #include "wl_game.h"
 #include "wl_net.h"
 #include "wl_state.h"
+#include "wl_framedata.h"
 
 static const angle_t dirangle[9] = {0,ANGLE_45,2*ANGLE_45,3*ANGLE_45,4*ANGLE_45,
 					5*ANGLE_45,6*ANGLE_45,7*ANGLE_45,0};
@@ -232,6 +233,17 @@ void T_Projectile (AActor *self)
 		movey /= steps;
 	}
 
+	static FrameData framedata;
+
+	if(frameon != projectile_frameon)
+	{
+		projectile_frameon = frameon;
+
+		framedata.InitXActors([](AActor *check) {
+				return !(check->flags & (FL_SHOOTABLE|FL_SOLID));
+			} );
+	}
+
 	AActor *lastHit = NULL; // For ripping, so we only hit an actor once per tic
 	do
 	{
@@ -245,26 +257,28 @@ void T_Projectile (AActor *self)
 		}
 
 		const bool playermissile = self->target && self->target->player;
-		AActor::Iterator iter = AActor::GetIterator();
-		while(iter.Next())
+
+		const auto max_r = framedata.max_radius + self->radius;
+		for(auto it = framedata.xactors.lower_bound(self->x - max_r);
+				it != framedata.xactors.upper_bound(self->x + max_r); ++it)
 		{
-			AActor *check = iter;
-			if(check == self)
-				continue;
-
-			// Pass through allies
-			if(playermissile)
-			{
-				if(check->player)
-					continue;
-			}
-			else
-			{
-				if(check->flags & FL_ISMONSTER)
-					continue;
-			}
-
-			if((check->flags & (FL_SHOOTABLE|FL_SOLID)) && lastHit != check)
+			auto check = it->second;
+			if(
+				check != self
+				// Pass through allies if fired by player
+				&& !(playermissile && check->player)
+				&& (
+					(check->flags & FL_ISMONSTER)
+					// Non-player missile cannot hit monster without
+					// FL_PROJHITENEMY
+					? (playermissile ||
+						(
+						 (self->extraflags & FL_PROJHITENEMY) != 0 &&
+						 self->target != check
+						))
+					: true)
+				&& ((check->flags & (FL_SHOOTABLE|FL_SOLID))
+				&& lastHit != check))
 			{
 				fixed deltax = abs(self->x - check->x);
 				fixed deltay = abs(self->y - check->y);
@@ -322,7 +336,8 @@ ACTION_FUNCTION(A_CustomMissile)
 	enum
 	{
 		CMF_AIMOFFSET = 1,
-		CMF_AIMDIRECTION = 2
+		CMF_AIMDIRECTION = 2,
+		CMF_PROJHITENEMY = 4
 	};
 
 	ACTION_PARAM_STRING(missiletype, 0);
@@ -357,6 +372,8 @@ ACTION_FUNCTION(A_CustomMissile)
 		newobj->missileParent = self;
 	newobj->target = newobj->missileParent;
 	newobj->angle = iangle;
+	if (flags & CMF_PROJHITENEMY)
+		newobj->extraflags |= FL_PROJHITENEMY;
 
 	newobj->velx = FixedMul(newobj->speed,finecosine[iangle>>ANGLETOFINESHIFT]);
 	newobj->vely = -FixedMul(newobj->speed,finesine[iangle>>ANGLETOFINESHIFT]);
@@ -482,10 +499,148 @@ bool CheckMeleeRange(AActor *inflictor, AActor *inflictee, fixed range)
 ===============
 */
 
+FRandom pr_pathing("Pathing");
 void SelectPathDir (AActor *ob)
 {
-	if (!TryWalk (ob))
-		ob->dir = nodir;
+	if(!(ob->extraflags & FL_BLAKEPATROL))
+	{
+		if (!TryWalk(ob))
+		{
+			ob->dir = nodir;
+		}
+		return;
+	}
+
+	bool CantWalk = false;
+	bool RandomTurn = false;
+
+	// Reset move distance and try to walk/turn.
+	//
+	ob->distance = TILEGLOBAL;
+	if (ob->extraflags & FL_RANDOMTURN)
+	{
+		RandomTurn = pr_pathing() > 180;
+	}
+	else
+	{
+		RandomTurn = false;
+	}
+	CantWalk = !TryWalk(ob, false);
+
+	// Handle random turns and hitting walls
+	//
+	if (RandomTurn || CantWalk)
+	{
+		// Either: path is blocked   OR   actor is randomly turning.
+		//
+		if (ob->trydir == nodir)
+		{
+			ob->trydir |= pr_pathing() & 128;
+		}
+		else
+		{
+			ob->dir = static_cast<dirtype>(ob->trydir & 127);
+		}
+
+		// Turn this actor
+		//
+		if (ob->trydir & 128)
+		{
+			int8_t dir = ob->dir;
+			if (ob->extraflags & FL_TRYTURN180)
+				dir = (dir < 4 ? dir + 4 : dir - 4);
+			else
+				dir--; // turn clockwise
+			if (dir < east)
+			{
+				dir = static_cast<dirtype>(nodir - 1);
+			}
+			ob->dir = static_cast<dirtype>(dir);
+		}
+		else
+		{
+			uint8_t dir = ob->dir;
+			if (ob->extraflags & FL_TRYTURN180)
+				dir = (dir < 4 ? dir + 4 : dir - 4);
+			else
+				dir++; // turn counter-clockwise
+			if (dir >= nodir)
+			{
+				dir = east;
+			}
+			ob->dir = static_cast<dirtype>(dir);
+		}
+		ob->trydir = static_cast<dirtype>((ob->trydir & 128) | ob->dir);
+
+		// Walk into new direction?
+		//
+		if (!TryWalk(ob, false))
+		{
+			ob->dir = nodir;
+		}
+	}
+
+	if (ob->dir != nodir)
+	{
+		TryWalk(ob, true);
+		ob->trydir = nodir;
+	}
+}
+
+/*
+===============
+=
+= SearchForTarget
+=
+===============
+*/
+FRandom pr_searchcollateral("SearchForCollateral");
+AActor* SearchForCollateral (AActor *self, AActor *target)
+{
+	TVector2<double> vecv(0.0, 0.0);
+	double distsqv = 0.0;
+	using TCollateralMap = std::map<double, ACollateral*>;
+	TCollateralMap foundbydist;
+
+	int32_t vdeltax = target->x - self->x;
+	int32_t vdeltay = target->y - self->y;
+	vecv = TVector2<double>(vdeltax, vdeltay);
+	distsqv = vecv.LengthSquared();
+	vecv.MakeUnit();
+	auto rotvecv = vecv.Rotated90CW();
+
+	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
+	{
+		int32_t deltax = iter->x - self->x;
+		int32_t deltay = iter->y - self->y;
+
+		TVector2<double> vecu(deltax,deltay);
+		double distsqu = 0.0;
+
+		if (iter != self &&
+			(iter->flags & FL_SHOOTABLE) &&
+			iter->IsKindOf(NATIVE_CLASS(Collateral)) &&
+			(distsqu = vecu.LengthSquared() < distsqv) &&
+			(vecu|vecv) > 0.0)
+		{
+			AActor *actor = iter;
+			ACollateral *collateral = static_cast<ACollateral *> (actor);
+
+			if (fabs(vecu|rotvecv) < collateral->HitRadius)
+				foundbydist[distsqu] = collateral;
+		}
+	}
+
+	for(auto kv: foundbydist)
+	{
+		ACollateral *collateral = kv.second;
+		if(pr_searchcollateral() * 100 / 256 < collateral->HitChance)
+		{
+			return collateral;
+		}
+	}
+
+	return NULL;
 }
 
 FRandom pr_chase("Chase");
@@ -496,23 +651,35 @@ ACTION_FUNCTION(A_Chase)
 		CHF_DONTDODGE = 1,
 		CHF_BACKOFF = 2,
 		CHF_NOSIGHTCHECK = 4,
-		CHF_NOPLAYACTIVE = 8
+		CHF_NOPLAYACTIVE = 8,
+		CHF_PATHING = 16,
 	};
 
 	ACTION_PARAM_STATE(melee, 0, self->MeleeState);
 	ACTION_PARAM_STATE(missile, 1, self->MissileState);
 	ACTION_PARAM_INT(flags, 2);
+	ACTION_PARAM_DOUBLE(minseedist, 3);
+	ACTION_PARAM_DOUBLE(maxseedist, 4);
+	ACTION_PARAM_DOUBLE(maxheardist, 5);
+	ACTION_PARAM_DOUBLE(fov, 6);
+
+	// FOV of 0 indicates default
+	if(fov < 0.00001)
+		fov = 180;
 
 	int32_t	move;
 	int		dx,dy,dist = INT_MAX,chance;
 	bool	dodge = !(flags & CHF_DONTDODGE);
-	bool	pathing = (self->flags & FL_PATHING) ? true : false;
+	bool	pathing =
+		((self->flags & FL_PATHING) || (flags & CHF_PATHING)) ?
+			true : false;
 
 	// target as player cannot go stale
 	// target which loses FL_SHOOTABLE will go stale
 	bool	staletarget = (self->target != NULL && self->target->player == NULL && !(self->target->flags & FL_SHOOTABLE));
 
-	if(!pathing && (self->target == NULL || staletarget))
+	if(!pathing && (self->target == NULL || staletarget ||
+				self->GetEnemyFactionList() != NULL))
 	{
 		if (staletarget)
 			self->target = NULL; // lose the stale target
@@ -538,8 +705,8 @@ ACTION_FUNCTION(A_Chase)
 
 				if (iter != self &&
 					(iter->player || (iter->flags & FL_SHOOTABLE)) &&
-					CheckIsEnemyByFaction(self, iter) &&
-					(!mincheck || dist < mindist))
+					(!mincheck || dist < mindist) &&
+					CheckIsEnemyByFaction(self, iter))
 				{
 					mincheck = iter;
 					mindist = dist;
@@ -558,6 +725,16 @@ ACTION_FUNCTION(A_Chase)
 			}
 			assert(self->target);
 		}
+	}
+
+	if (pathing)
+	{
+		if(self->PendingPatrolChange)
+		{
+			self->angle = self->PendingPatrolAngle;
+			self->dir = self->PendingPatrolDir;
+		}
+		self->PendingPatrolChange = false;
 	}
 
 	if (self->dir == nodir)
@@ -643,7 +820,7 @@ ACTION_FUNCTION(A_Chase)
 	}
 	else
 	{
-		if (!(flags & CHF_NOSIGHTCHECK) && SightPlayer (self, 0, 0, 0, 180, self->SeeState))
+		if (!(flags & CHF_NOSIGHTCHECK) && SightPlayer (self, minseedist, maxseedist, maxheardist, fov, self->SeeState))
 			return true;
 	}
 
@@ -825,6 +1002,11 @@ ACTION_FUNCTION(A_WolfAttack)
 
 		NetDPrintf("Actor %s called A_WolfAttack without target.\n", self->GetClass()->GetName().GetChars());
 		return true;
+	}
+
+	if (auto collateral = SearchForCollateral (self, target))
+	{
+		target = collateral;
 	}
 
 	runspeed *= 37.5;

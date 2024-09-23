@@ -383,11 +383,17 @@ extern fixed viewz;
 // from wl_floorceiling.cpp
 namespace Shading
 {
-	int LightForIntercept (fixed xintercept, fixed yintercept);
+	int LightForIntercept (fixed xintercept, fixed yintercept, const ClassDef* &littype);
 
-	void PrepareConstants (int halfheight, fixed planeheight, fixed planenumerator);
+	const BYTE *GetCMapStart (const ClassDef *littype);
 
-	void NextY (int y, int lx, int rx);
+	bool GetFullBrightInhibit (const ClassDef *littype);
+
+	void PrepareConstants (int halfheight, fixed planeheight);
+
+	void NextY (int y, int lx, int rx, int bot);
+
+	const ClassDef *LitForPix ();
 }
 
 void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height)
@@ -408,7 +414,7 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	if(actor->sprite == SPR_NONE || loadedSprites[actor->sprite].numFrames == 0)
 		return;
 
-	bool flip = false;
+	bool flip = (actor->FlipSprite);
 	const Sprite &spr = spriteFrames[loadedSprites[actor->sprite].frames+frame->frame];
 	FTexture *tex;
 	if(spr.rotations == 0)
@@ -417,7 +423,8 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	{
 		const unsigned int rot = CalcRotate(actor);
 		tex = TexMan[spr.texture[rot]];
-		flip = (spr.mirror>>rot)&1;
+		if ((spr.mirror>>rot)&1)
+			flip = !flip;
 	}
 	if(tex == NULL)
 		return;
@@ -437,13 +444,39 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	const fixed yRun = MIN<fixed>(tex->GetHeight()<<FRACBITS, (yStep*((viewheight<<3)-upperedge))>>3);
 
 	const BYTE *colormap;
-	if((actor->flags & FL_BRIGHT) || frame->fullbright)
-		colormap = NormalLight.Maps;
+	const ClassDef *littype = NULL;
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight +
+		Shading::LightForIntercept (actor->absx, actor->absy, littype));
+	const BYTE *cmapstart = Shading::GetCMapStart (littype);
+	if(((actor->flags & FL_BRIGHT) || frame->fullbright) &&
+	   !Shading::GetFullBrightInhibit(littype))
+	{
+		colormap = cmapstart;
+	}
 	else
 	{
-		const int shade = LIGHT2SHADE(gLevelLight + r_extralight + Shading::LightForIntercept (actor->absx, actor->absy));
 		const int tz = FixedMul(r_depthvisibility<<8, height);
-		colormap = &NormalLight.Maps[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+		colormap = &cmapstart[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+	}
+
+	const ClassDef * const litfilter = actor->litfilter;
+	if (litfilter != NULL)
+	{
+		//std::cerr << actor << " " << (upperedge>>3) << " " << actor->z << " " << tex->GetScaledTopOffsetDouble() << std::endl;
+		const fixed planeheight = viewz;
+		const int halfheight = (viewheight >> 1) - viewshift;
+		Shading::PrepareConstants (halfheight, planeheight);
+
+		const fixed heightFactor = abs(planeheight)>>8;
+		int y = ((height*heightFactor)>>FRACBITS) - abs(viewshift);
+
+		int pixcnt = 0;
+		unsigned int i;
+		fixed x;
+		for(i = actx+startX, x = startX*xStep;x < xRun;x += xStep, ++i)
+			pixcnt++;
+
+		Shading::NextY (y, actx+startX, MIN((actx+startX)+pixcnt,(unsigned)viewwidth), 1);
 	}
 
 	const BYTE *src;
@@ -453,7 +486,9 @@ void ScaleSprite(AActor *actor, int xcenter, const Frame *frame, unsigned height
 	fixed x, y;
 	for(i = actx+startX, x = startX*xStep;x < xRun;x += xStep, ++i, dest = ++destBase)
 	{
-		if(wallheight[i] > (signed)height)
+		if(litfilter != NULL && Shading::LitForPix () != litfilter)
+			continue;
+		if(wallheight[i][0] > (signed)height)
 			continue;
 
 		src = tex->GetColumn(flip ? texWidth - (x>>FRACBITS) - 1 : (x>>FRACBITS), NULL);
@@ -493,13 +528,19 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 
 	// [XA] TODO: shade the sprite per-column?
 	const BYTE *colormap;
-	if((actor->flags & FL_BRIGHT) || frame->fullbright)
-		colormap = NormalLight.Maps;
+	const ClassDef *littype = NULL;
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight +
+		Shading::LightForIntercept (actor->x, actor->y, littype));
+	const BYTE *cmapstart = Shading::GetCMapStart (littype);
+	if(((actor->flags & FL_BRIGHT) || frame->fullbright) &&
+	   !Shading::GetFullBrightInhibit(littype))
+	{
+		colormap = cmapstart;
+	}
 	else
 	{
-		const int shade = LIGHT2SHADE(gLevelLight + r_extralight + Shading::LightForIntercept (actor->x, actor->y));
 		const int tz = FixedMul(r_depthvisibility<<8, height);
-		colormap = &NormalLight.Maps[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+		colormap = &cmapstart[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
 	}
 	const BYTE *src;
 
@@ -519,8 +560,7 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 	{
 		while(i > nexti)
 		{
-			++x;
-			assert(x < texWidth);
+			x = std::min(x + 1, texWidth - 1);
 			src = tex->GetColumn(flip ? texWidth - x - 1 : x, NULL);
 
 			dxa += dxx;
@@ -535,7 +575,7 @@ void Scale3DSpriter(AActor *actor, int x1, int x2, FTexture *tex, bool flip, con
 		scale = height>>3;
 		topoffset = (scale*(viewz+(actor->z<<6)+(32<<FRACBITS))/(32<<FRACBITS));
 
-		if(i < 0 || i >= viewwidth || wallheight[i] > (signed)height || scale == 0 || -(viewheight/2 - viewshift - topoffset) >= scale)
+		if(i < 0 || i >= viewwidth || wallheight[i][0] > (signed)height || scale == 0 || -(viewheight/2 - viewshift - topoffset) >= scale)
 			continue;
 		
 		dest = vbuf + i + (upperedge > 0 ? vbufPitch*upperedge : 0);
@@ -658,12 +698,23 @@ void R_DrawPlayerSprite(AActor *actor, const Frame *frame, fixed offsetX, fixed 
 		return;
 
 	const BYTE *colormap;
-	if(frame->fullbright)
-		colormap = NormalLight.Maps;
+	const ClassDef *littype = NULL;
+	const int shade = LIGHT2SHADE(gLevelLight + r_extralight +
+		Shading::LightForIntercept (viewx, viewy, littype));
+	const BYTE *cmapstart = Shading::GetCMapStart (littype);
+	if(frame->fullbright && !Shading::GetFullBrightInhibit(littype))
+		colormap = cmapstart;
+	else if(frame->zonebright)
+	{
+		fixed nx = TILEGLOBAL*2;
+		unsigned height = (word)((heightnumerator<<8)/nx);
+		const int tz = FixedMul(r_depthvisibility<<8, height);
+		colormap = &cmapstart[GETPALOOKUP(MAX(tz, MINZ), shade)<<8];
+	}
 	else
 	{
-		const int shade = LIGHT2SHADE(gLevelLight + Shading::LightForIntercept (viewx, viewy)) - (gLevelMaxLightVis/LIGHTVISIBILITY_FACTOR);
-		colormap = &NormalLight.Maps[GETPALOOKUP(0, shade)<<8];
+		const int shade = LIGHT2SHADE(gLevelLight) - (gLevelMaxLightVis/LIGHTVISIBILITY_FACTOR);
+		colormap = &cmapstart[GETPALOOKUP(0, shade)<<8];
 	}
 
 	const fixed scale = viewheight<<(FRACBITS-1);
@@ -805,3 +856,43 @@ void R_DrawSpriteAsGraphic (AActor *actor)
 
 	VWB_DrawGraphic(tex, actor->picX, actor->picY);
 }
+
+FTextureID R_GetCurActorFrame (AActor *actor)
+{
+	if(actor->sprite == SPR_NONE ||
+			loadedSprites[actor->sprite].numFrames == 0)
+	{
+		return FTextureID();
+	}
+	const auto &spr = spriteFrames[loadedSprites[actor->sprite].frames +
+		actor->state->frame];
+	return spr.texture[0];
+};
+
+std::vector<FTextureID> R_GetAttackingFrames (AActor *actor)
+{
+	if(actor->PathState == NULL && actor->SeeState == NULL)
+	{
+		return std::vector<FTextureID>(1, R_GetCurActorFrame(actor));
+	}
+
+	std::vector<FTextureID> texids;
+
+	auto frame = (actor->PathState != NULL ? actor->PathState : actor->SeeState);
+	auto start_frame = frame;
+	do
+	{
+		if(loadedSprites[frame->spriteInf].numFrames > 0)
+		{
+			const auto &spr = spriteFrames[loadedSprites[
+				frame->spriteInf].frames + frame->frame];
+			auto texid = spr.texture[spr.rotations == 8 ? 7 : 0];
+			if(texids.empty() || texid != texids.back())
+				texids.push_back(texid);
+		}
+		frame = frame->next;
+	}
+	while (frame != NULL && frame != start_frame);
+
+	return texids;
+};

@@ -56,7 +56,8 @@ enum
 	APMETA_Slot9,
 	APMETA_StartInventory,
 	APMETA_DisplayName,
-	APMETA_MoveBob
+	APMETA_MoveBob,
+	APMETA_MoveBobSpeed
 };
 
 class APlayerPawn : public AActor
@@ -84,11 +85,16 @@ class APlayerPawn : public AActor
 		fixed		forwardmove[2];
 		fixed		sidemove[2];
 		fixed		viewheight;
+		fixed		forwardthrust;
+		fixed		sidethrust;
+		fixed		rotthrust;
 
 	protected:
 		AWeapon	*BestWeapon(const ClassDef *ammo=NULL);
 
 		void Cmd_Use();
+
+		bool Interrogate();
 };
 
 #endif

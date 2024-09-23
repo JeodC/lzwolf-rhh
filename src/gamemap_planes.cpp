@@ -32,6 +32,7 @@
 **
 */
 
+#include <functional>
 #include <climits>
 
 #include "doomerrors.h"
@@ -46,6 +47,13 @@
 #include "w_wad.h"
 #include "wl_game.h"
 #include "wl_shade.h"
+#include "m_random.h"
+
+#include <vector>
+#include "wl_agent.h"
+#include "wl_play.h"
+#include "id_sd.h"
+#include "a_inventory.h"
 
 static const char* const FeatureFlagNames[] = {
 	"globalmeta",
@@ -108,6 +116,8 @@ public:
 		unsigned short	oldnum;
 		unsigned char	angles;
 		unsigned char	minskill;
+		int				minangle;
+		int				numdirs;
 	};
 
 	struct ThingSpecialXlat
@@ -136,18 +146,6 @@ public:
 
 	Xlat() : lump(0)
 	{
-	}
-
-	void ClearTables()
-	{
-		// Clear out old data (to be called before initial load)
-		for(unsigned int i = 0;i < 256;++i)
-		{
-			flatTable[i][0].SetInvalid();
-			flatTable[i][1].SetInvalid();
-		}
-		tileTriggers.Clear();
-		thingTable.Clear();
 	}
 
 	void LoadXlat(const FString &baseLumpName, const GameInfo::FStringStack *baseStack, bool included=false)
@@ -300,6 +298,20 @@ public:
 		return flatTable[index][ceiling];
 	}
 
+	FName TranslateFlatToFootSplash(unsigned int index, FName def)
+	{
+		if (def.IsValidName() && def != NAME_None)
+		{
+			if(flatFootSplashTable[index].IsValidName() && flatFootSplashTable[index] != NAME_None)
+			{
+				return flatFootSplashTable[index];
+			}
+			return def;
+		}
+
+		return flatFootSplashTable[index];
+	}
+
 	bool TranslateTileTrigger(unsigned short tile, MapTrigger &trigger)
 	{
 		MapTrigger *item = tileTriggers.CheckKey(tile);
@@ -348,6 +360,9 @@ public:
 		}
 		else
 			thing.angle = 0;
+		if(type.minangle != 0)
+			thing.angle = (thing.angle + type.minangle)%360;
+		thing.numdirs = (type.numdirs == 4 ? 4 : 1);
 
 		thing.patrol = type.flags&Xlat::TF_PATHING;
 		thing.skill[0] = thing.skill[1] = type.minskill <= 1;
@@ -403,6 +418,18 @@ protected:
 		while(!sc.CheckToken('}'))
 		{
 			sc.MustGetToken(TK_Identifier);
+			if(sc->str.CompareNoCase("footsplash") == 0)
+			{
+				const TMap<unsigned int, FString> table = LoadStringTable(sc);
+				TMap<unsigned int, FString>::ConstPair *pair;
+				for(TMap<unsigned int, FString>::ConstIterator iter(table);iter.NextPair(pair);)
+				{
+					if(pair->Key > 255)
+						continue;
+					flatFootSplashTable[pair->Key] = pair->Value;
+				}
+				continue;
+			}
 			bool ceiling = sc->str.CompareNoCase("ceiling") == 0;
 			if(!ceiling && sc->str.CompareNoCase("floor") != 0)
 				sc.ScriptMessage(Scanner::ERROR, "Unknown flat section '%s'.", sc->str.GetChars());
@@ -646,6 +673,24 @@ protected:
 				sc.MustGetToken(',');
 				sc.MustGetToken(TK_IntConst);
 				thing.minskill = sc->number;
+				thing.minangle = 0;
+				thing.numdirs = 0;
+				if(sc.CheckToken(','))
+				{
+					sc.MustGetToken(TK_Identifier);
+					if(sc->str.CompareNoCase("minangle") == 0)
+					{
+						sc.MustGetToken('=');
+						sc.MustGetToken(TK_IntConst);
+						thing.minangle = sc->number;
+					}
+					else if(sc->str.CompareNoCase("numdirs") == 0)
+					{
+						sc.MustGetToken('=');
+						sc.MustGetToken(TK_IntConst);
+						thing.numdirs = sc->number;
+					}
+				}
 				sc.MustGetToken('}');
 
 				if(oldTableSize &&
@@ -683,6 +728,25 @@ protected:
 	}
 
 private:
+	void ClearTables()
+	{
+		// Clear out old data (to be called before initial load)
+		for(unsigned int i = 0;i < 256;++i)
+		{
+			flatTable[i][0].SetInvalid();
+			flatTable[i][1].SetInvalid();
+			flatFootSplashTable[i] = FName();
+		}
+		thingTable.Clear();
+		thingSpecialTable.Clear();
+		tilePalette.Clear();
+		tileTriggers.Clear();
+		modZones.Clear();
+		zonePalette.Clear();
+		musicTable.Clear();
+		FeatureFlags = static_cast<EFeatureFlags>(0);
+	}
+
 	int lump;
 
 	TArray<ThingXlat> thingTable;
@@ -693,6 +757,7 @@ private:
 	TMap<WORD, MapZone> zonePalette;
 	TMap<unsigned, FString> musicTable;
 	FTextureID flatTable[256][2]; // Floor/ceiling textures
+	FName flatFootSplashTable[256];
 	EFeatureFlags FeatureFlags;
 };
 static Xlat xlat;
@@ -957,7 +1022,7 @@ void GameMap::ReadMacData()
 void GameMap::ReadPlanesData()
 {
 	static const unsigned short UNIT = 64;
-	enum OldPlanes { Plane_Tiles, Plane_Object, Plane_Flats, NUM_USABLE_PLANES };
+	enum OldPlanes { Plane_Tiles, Plane_Object, Plane_Flats, Plane_Info, Plane_LightCells, NUM_USABLE_PLANES };
 
 	if(levelInfo->Translator.IsEmpty())
 		xlat.LoadXlat(gameinfo.Translator.str, gameinfo.Translator.Next());
@@ -966,6 +1031,14 @@ void GameMap::ReadPlanesData()
 
 	Xlat::EFeatureFlags FeatureFlags = xlat.GetFeatureFlags();
 	sectorPalette.Clear();
+	lightSectorPalette.Clear();
+
+#ifdef USE_GPL
+	if(FeatureFlags & Xlat::FF_GLOBALMETA)
+	{
+		ResetHints();
+	}
+#endif
 
 	// Old format maps always have a tile size of 64
 	header.tileSize = UNIT;
@@ -1025,13 +1098,80 @@ void GameMap::ReadPlanesData()
 	FTextureID defaultCeiling = levelInfo->DefaultTexture[Sector::Ceiling];
 	FTextureID defaultFloor = levelInfo->DefaultTexture[Sector::Floor];
 
+#ifdef USE_GPL
+	auto onspawn_concession = [this](MapTrigger &trigger, WORD &oldnum, WORD &oldnum2)
+	{
+		const auto machinetype = trigger.arg[1];
+		trigger.arg[1] = this->SpawnConcession(oldnum, machinetype);
+		oldnum = 0;
+	};
+	auto onspawn_wallswitch = [this](MapTrigger &trigger, WORD &oldnum, WORD &oldnum2)
+	{
+		//const auto onOff = trigger.arg[1];
+		if ((oldnum & 0xFF00) == 0xF800)
+		{
+			const auto barrier_code = this->SpawnWallSwitch(oldnum, oldnum2,
+					trigger.x, trigger.y);
+			trigger.arg[1] = barrier_code;
+			oldnum = oldnum2 = 0;
+		}
+	};
+
+	using TOnSpawnAction = std::function<void(MapTrigger &, WORD &, WORD &)>;
+	const std::map<std::string, TOnSpawnAction> onSpawnActions =
+	{
+		{ "OnSpawn_Concession", onspawn_concession },
+		{ "OnSpawn_WallSwitch", onspawn_wallswitch },
+	};
+#endif
+
+	auto init_switch_dest = [](TArray<Tile>& tilePalette) {
+		std::map<std::string, const MapTile*> tileByEastTexture;
+
+		for(unsigned int i = 0; i < tilePalette.Size(); ++i)
+		{
+			const auto &tile = tilePalette[i];
+			auto texture = tile.texture[MapTile::East];
+			if(texture.isValid() && TexMan[texture] != nullptr)
+			{
+				tileByEastTexture[TexMan[texture]->Name.GetChars()] = &tile;
+				//printf("%s %p\n", TexMan[texture]->Name.GetChars(), &tile);
+			}
+		}
+
+		for(unsigned int i = 0; i < tilePalette.Size(); ++i)
+		{
+			auto &tile = tilePalette[i];
+			if(!tile.switchTextureEast.IsEmpty())
+			{
+				auto it = tileByEastTexture.find(
+						tile.switchTextureEast.GetChars());
+				if(it != std::end(tileByEastTexture))
+				{
+					tile.switchDestTile = it->second;
+				}
+			}
+		}
+	};
+
+	std::vector<WORD> oldnums(size);
+
 	for(int plane = 0;plane < numPlanes && plane < NUM_USABLE_PLANES;++plane)
 	{
 		if(plane == 3) // Info plane is already read
 			continue;
 
+		lump->Seek(18+nameLength, SEEK_SET);
+		lump->Seek(size*2*plane, SEEK_CUR);
+
 		TUniquePtr<WORD[]> oldplane(new WORD[size]);
-		lump->Read(oldplane.Get(), size*2);
+		if(plane == Plane_Object)
+		{
+			memcpy(oldplane.Get(), &oldnums[0], size*2);
+			oldnums.clear();
+		}
+		else
+			lump->Read(oldplane.Get(), size*2);
 
 		switch(plane)
 		{
@@ -1041,11 +1181,15 @@ void GameMap::ReadPlanesData()
 			case Plane_Tiles:
 			{
 				WORD tileStart = xlat.GetTilePalette(tilePalette);
+				init_switch_dest(tilePalette);
+
 				xlat.GetZonePalette(zonePalette);
 
 				TArray<WORD> fillSpots;
 				TMap<WORD, Xlat::ModZone> changeTriggerSpots;
-				
+
+				// read out the object plane early
+				lump->Read(&oldnums[0], size*2);
 
 				for(unsigned int i = 0;i < size;++i)
 				{
@@ -1079,6 +1223,16 @@ void GameMap::ReadPlanesData()
 						templateTrigger.x = i%header.width;
 						templateTrigger.y = i/header.width;
 						templateTrigger.z = 0;
+
+#ifdef USE_GPL
+						auto spawnActionName = std::string{templateTrigger.onSpawnAction};
+						auto it = onSpawnActions.find(spawnActionName);
+						if(it != std::end(onSpawnActions))
+						{
+							auto cb = it->second;
+							cb(templateTrigger, oldnums[i], oldnums[i+1]);
+						}
+#endif
 
 						triggers.Push(templateTrigger);
 					}
@@ -1230,9 +1384,23 @@ void GameMap::ReadPlanesData()
 						switch(oldplane[i]>>8)
 						{
 							default: break;
+#ifdef USE_GPL
 							case 0xF1: // Informant messages
 							case 0xF2: // Scientist messages
-							case 0xF3: // Men scientist messages
+							case 0xF3: // Mean scientist messages
+								{
+									auto zone = mapPlane.map[i].zone;
+									auto areanumber = 0xff;
+									if(zone != NULL)
+									{
+										areanumber = (zone->hintareanum != -1 ?
+												zone->hintareanum : zone->index);
+									}
+									ProcessHintTile(oldplane[i]>>8, oldplane[i]&0xff,
+											static_cast<uint8_t>(areanumber));
+								}
+								continue;
+#endif
 							case 0xF5: // Intralevel warp coordinate
 								continue;
 							case 0xFB:
@@ -1275,6 +1443,7 @@ void GameMap::ReadPlanesData()
 					Trigger trigger;
 					uint32_t flags = 0;
 					uint32_t tsFlags = 0;
+					int dir = 0;
 
 					if((tsFlags = xlat.TranslateThing(thing, trigger, flags, oldplane[i])) == 0)
 						printf("Unknown old type %d @ (%d,%d)\n", oldplane[i], i%header.width, i/header.width);
@@ -1296,10 +1465,25 @@ void GameMap::ReadPlanesData()
 						{
 							teleporterSpots[oldplane[i]].Push(&mapPlane.map[i]);
 						}
-						if(tsFlags & Xlat::TSF_ISTHING)
+						for(dir = 0; (tsFlags & Xlat::TSF_ISTHING) &&
+								(dir < thing.numdirs); ++dir)
 						{
 							thing.x = ((i%header.width)<<FRACBITS)+(FRACUNIT/2);
 							thing.y = ((i/header.width)<<FRACBITS)+(FRACUNIT/2);
+							using TDirOffset = std::pair<fixed, fixed>;
+							static std::array<TDirOffset, 4> offsets = {
+								TDirOffset{FRACUNIT/2,     0},
+								TDirOffset{0,              -FRACUNIT/2},
+								TDirOffset{-FRACUNIT/2,    0},
+								TDirOffset{0,              FRACUNIT/2},
+							};
+							if(thing.numdirs == 4)
+							{
+								thing.x += offsets[dir].first;
+								thing.y += offsets[dir].second;
+								thing.angle = dir*90;
+								thing.dir4ind = dir;
+							}
 							if((FeatureFlags & Xlat::FF_ZHEIGHTS) && (infoplane[i]&0xFF00) == 0xB000)
 							{
 								// ROTT uses the signed lower byte of info plane to assign height in 1/16 tile (4 unit) increments
@@ -1347,7 +1531,7 @@ void GameMap::ReadPlanesData()
 				}
 
 				// Check for parallax sky
-				bool lvlHasParallax = levelInfo->ParallaxSky.Size() > 0;
+				bool lvlHasParallax = levelInfo->SkyEnabled();
 
 				// Build the palette.
 				sectorPalette.Resize(type);
@@ -1360,11 +1544,43 @@ void GameMap::ReadPlanesData()
 
 					FTextureID ceilid = lvlHasParallax ? FNullTextureID() : defaultCeiling;
 					sect.texture[Sector::Ceiling] = xlat.TranslateFlat(pair->Key>>8, Sector::Ceiling, ceilid);
+					sect.footSplash = xlat.TranslateFlatToFootSplash(pair->Key&0xFF, levelInfo->FootSplash);
 				}
 
 				// Now link the sector data to map points!
 				for(unsigned int i = 0;i < size;++i)
 					mapPlane.map[i].sector = &sectorPalette[flatMap[oldplane[i]]];
+				break;
+			}
+
+			case Plane_LightCells:
+			{
+				// Look for all unique light values.
+				unsigned int type = lightSectorPalette.Size();
+				TMap<int, unsigned int> lightCellMap;
+				for(unsigned int i = 0;i < size;++i)
+				{
+					oldplane[i] = LittleShort(oldplane[i]);
+
+					int light = static_cast<SWORD>(oldplane[i]);
+					if(!lightCellMap.CheckKey(light))
+						lightCellMap[light] = type++;
+				}
+
+				// Build the palette.
+				lightSectorPalette.Resize(type);
+				TMap<int, unsigned int>::ConstIterator iter(lightCellMap);
+				TMap<int, unsigned int>::ConstPair *pair;
+				while(iter.NextPair(pair))
+				{
+					LightSector &lightsector = lightSectorPalette[pair->Value];
+					lightsector.light = pair->Key;
+					lightsector.index = pair->Value;
+				}
+
+				// Now link the lightsector data to map points!
+				for(unsigned int i = 0;i < size;++i)
+					mapPlane.map[i].lightsector = &lightSectorPalette[lightCellMap[oldplane[i]]];
 				break;
 			}
 		}
@@ -1520,6 +1736,13 @@ void GameMap::ReadPlanesData()
 			}
 		}
 	}
+
+#ifdef USE_GPL
+	if(FeatureFlags & Xlat::FF_GLOBALMETA)
+	{
+		InitInformantMessageState();
+	}
+#endif
 }
 
 void GameMap::ChangeMusic(int selection)

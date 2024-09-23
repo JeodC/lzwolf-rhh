@@ -44,6 +44,7 @@
 #include "g_mapinfo.h"
 #include "g_shared/a_deathcam.h"
 #include "g_shared/a_inventory.h"
+#include "g_shared/a_ambient.h"
 #include "lnspec.h"
 #include "m_random.h"
 #include "thingdef/thingdef.h"
@@ -54,6 +55,7 @@
 #include "wl_game.h"
 #include "wl_play.h"
 #include "wl_state.h"
+#include "am_map.h"
 
 static ActionTable *actionFunctions = NULL;
 ActionInfo::ActionInfo(ActionPtr func, const FName &name) : func(func), name(name),
@@ -152,7 +154,18 @@ ACTION_FUNCTION(A_ActiveSound)
 
 ACTION_FUNCTION(A_AlertMonsters)
 {
-	madenoise = true;
+	ACTION_PARAM_INT(noise, 0);
+	madenoise += noise;
+	return true;
+}
+
+ACTION_FUNCTION(A_AmbientJumpState)
+{
+	ACTION_PARAM_STATE(frame, 0, NULL);
+	ACTION_PARAM_BOOL(enter, 1);
+
+	AAmbient* ambient_actor = reinterpret_cast<AAmbient*>(self);
+	ambient_actor->JumpState(frame, enter);
 	return true;
 }
 
@@ -365,7 +378,7 @@ ACTION_FUNCTION_NS(A_Explode, lz)
 	ACTION_PARAM_STRING(damagetype, 5);
 
 	if(alert)
-		madenoise = true;
+		madenoise = 1;
 
 	const double rolloff = 1.0/static_cast<double>(radius - fulldamageradius);
 	for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
@@ -421,17 +434,35 @@ ACTION_FUNCTION(A_GiveExtraMan)
 
 ACTION_FUNCTION(A_GiveInventory)
 {
+	enum
+	{
+		OWNER_SELF = 0,
+		OWNER_TARGET = 1,
+		OWNER_PLAYER = 2,
+	};
 	ACTION_PARAM_STRING(className, 0);
 	ACTION_PARAM_INT(amount, 1);
+	ACTION_PARAM_INT(owner, 2);
 
 	const ClassDef *cls = ClassDef::FindClass(className);
+
+	AActor *invowner = self;
+	switch(owner)
+	{
+		case OWNER_TARGET:
+			invowner = self->target;
+			break;
+		case OWNER_PLAYER:
+			invowner = players[0].mo;
+			break;
+	}
 
 	if(amount == 0)
 		amount = 1;
 
 	if(cls && cls->IsDescendantOf(NATIVE_CLASS(Inventory)))
 	{
-		return self->GiveInventory(cls, amount);
+		return invowner->GiveInventory(cls, amount);
 	}
 	return true;
 }
@@ -553,14 +584,22 @@ ACTION_FUNCTION(A_JumpIf)
 
 ACTION_FUNCTION(A_JumpIfCloser)
 {
+	enum
+	{
+		TARGET_AUTO = 0,
+		TARGET_PLAYER = 1,
+	};
 	ACTION_PARAM_DOUBLE(distance, 0);
 	ACTION_PARAM_STATE(frame, 1, NULL);
+	ACTION_PARAM_INT(target, 2);
 
 	AActor *check;
 	if(self->player)
 		check = self->player->FindTarget();
 	else
 		check = self->target;
+	if(target == TARGET_PLAYER)
+		check = players[0].mo;
 
 	// << 6 - Adjusts to Doom scale
 	if(check && P_AproxDistance((self->x-check->x)<<6, (self->y-check->y)<<6) < (fixed)(distance*FRACUNIT))
@@ -574,12 +613,30 @@ ACTION_FUNCTION(A_JumpIfCloser)
 
 ACTION_FUNCTION(A_JumpIfInventory)
 {
+	enum
+	{
+		OWNER_SELF = 0,
+		OWNER_TARGET = 1,
+		OWNER_PLAYER = 2,
+	};
 	ACTION_PARAM_STRING(className, 0);
 	ACTION_PARAM_INT(amount, 1);
 	ACTION_PARAM_STATE(frame, 2, NULL);
+	ACTION_PARAM_INT(owner, 3);
+
+	AActor *invowner = self;
+	switch(owner)
+	{
+		case OWNER_TARGET:
+			invowner = self->target;
+			break;
+		case OWNER_PLAYER:
+			invowner = players[0].mo;
+			break;
+	}
 
 	const ClassDef *cls = ClassDef::FindClass(className);
-	AInventory *inv = self->FindInventory(cls);
+	AInventory *inv = invowner->FindInventory(cls);
 
 	if(!inv)
 		return false;
@@ -641,9 +698,31 @@ ACTION_FUNCTION(A_MeleeAttack)
 ACTION_FUNCTION(A_MirrorPosition)
 {
 	ACTION_PARAM_DOUBLE(mirx, 0);
+	ACTION_PARAM_INT(axis, 1);
 
 	fixed_t mirxfixed = FLOAT2FIXED(mirx);
-	self->x = mirxfixed + (mirxfixed - players[0].camera->x);
+
+	self->x = players[0].camera->x;
+	self->y = players[0].camera->y;
+
+	int curang = (players[0].camera->angle>>ANGLETOFINESHIFT)*360/FINEANGLES;
+	if(axis == 0)
+	{
+		self->x = mirxfixed + (mirxfixed - players[0].camera->x);
+		self->angle = ((360 + 180 - curang) % 360)*ANGLE_1;
+	}
+	else if(axis == 1)
+	{
+		self->y = mirxfixed + (mirxfixed - players[0].camera->y);
+		self->angle = ((360 - curang) % 360)*ANGLE_1;
+	}
+
+	const unsigned int mapwidth = map->GetHeader().width;
+	const unsigned int mapheight = map->GetHeader().height;
+	if(self->x < 0 || (self->x >= FLOAT2FIXED(mapwidth)))
+		self->x = 0;
+	if(self->y < 0 || (self->y >= FLOAT2FIXED(mapheight)))
+		self->y = 0;
 
 	return false;
 }
@@ -750,8 +829,8 @@ ACTION_FUNCTION(A_ScaleVelocity)
 {
 	ACTION_PARAM_DOUBLE(scale, 0);
 
-	self->velx = FLOAT2FIXED(self->velx*scale);
-	self->vely = FLOAT2FIXED(self->vely*scale);
+	self->velx = fixed_t(self->velx*scale);
+	self->vely = fixed_t(self->vely*scale);
 	return true;
 }
 
@@ -762,6 +841,49 @@ ACTION_FUNCTION(A_SelectWeapon)
 	AWeapon *newWeapon = self->player->weapons.Slots[slot].PickWeapon(self->player);
 	if (newWeapon && newWeapon != self->player->ReadyWeapon)
 		self->player->PendingWeapon = newWeapon;
+
+	return true;
+}
+
+ACTION_FUNCTION(A_SetHealth)
+{
+	ACTION_PARAM_INT(health, 0);
+
+	AActor *mobj = self;
+
+	if (!mobj)
+	{
+		return false;
+	}
+
+	player_t *player = mobj->player;
+	if (player)
+	{
+		if (health <= 0)
+			player->mo->health = mobj->health = player->health = 1; //Copied from the buddha cheat.
+		else
+			player->mo->health = mobj->health = player->health = health;
+	}
+	else if (mobj)
+	{
+		if (health <= 0)
+			mobj->health = 1;
+		else
+			mobj->health = health;
+	}
+
+	return true;
+}
+
+ACTION_FUNCTION(A_SetIntegerProperty)
+{
+	ACTION_PARAM_STRING(propName, 0);
+	ACTION_PARAM_INT(value, 1);
+
+	FString strvalue;
+	strvalue.Format("%d", value);
+
+	ClassDef::SetProperty(self, self->GetClass(), propName, strvalue.GetChars());
 
 	return true;
 }
@@ -779,10 +901,49 @@ ACTION_FUNCTION(A_SetPicXY)
 
 ACTION_FUNCTION(A_SetProperty)
 {
-	ACTION_PARAM_STRING(propName, 0);
-	ACTION_PARAM_STRING(value, 1);
+	enum
+	{
+		PRT_SELF = 1,
+		PRT_READYWEAPON = 2,
+	};
 
-	ClassDef::SetProperty(self, self->GetClass(), propName, value.GetChars());
+ 	ACTION_PARAM_STRING(propName, 0);
+ 	ACTION_PARAM_STRING(value, 1);
+	ACTION_PARAM_INT(target, 2);
+
+	AActor *targ = self;
+	if(target == PRT_READYWEAPON && self->player && self->player->ReadyWeapon)
+		targ = self->player->ReadyWeapon;
+ 
+	ClassDef::SetProperty(targ, targ->GetClass(), propName, value.GetChars());
+ 
+	return true;
+}
+
+ACTION_FUNCTION(A_SetSpotVisionByTag)
+{
+	enum
+	{
+		SVI_FAILCHECKLINE = 0x01,
+		SVI_FAILCHECKSIDE = 0x02,
+	};
+	ACTION_PARAM_INT(tag, 0);
+	ACTION_PARAM_BOOL(allow, 1);
+	ACTION_PARAM_INT(flags, 2);
+
+	unsigned int amf_flags = 0;
+	if(flags & SVI_FAILCHECKLINE)
+		amf_flags |= AutoMap::AMF_FailCheckLine;
+	if(flags & SVI_FAILCHECKSIDE)
+		amf_flags |= AutoMap::AMF_FailCheckSide;
+
+	MapSpot dest = NULL;
+	while((dest = map->GetSpotByTag(tag, dest)))
+	{
+		dest->amFlags &= ~amf_flags;
+		if(!allow)
+			dest->amFlags |= amf_flags;
+	}
 
 	return true;
 }
@@ -809,6 +970,14 @@ ACTION_FUNCTION(A_SetTics)
 	return true;
 }
 
+ACTION_FUNCTION(A_SetVolume)
+{
+	ACTION_PARAM_DOUBLE(volume, 0);
+
+	LoopedAudio::setVolume (self->spawnid, volume);
+	return true;
+}
+
 ACTION_FUNCTION(A_SpawnItem)
 {
 	ACTION_PARAM_STRING(className, 0);
@@ -831,7 +1000,9 @@ ACTION_FUNCTION(A_SpawnItemEx)
 {
 	enum
 	{
-		SXF_TRANSFERPOINTERS = 0x1
+		SXF_TRANSFERPOINTERS = 0x1,
+		SXF_PROJHITENEMY = 0x2,
+		SXF_CLIPMAPBOUNDS = 0x4,
 	};
 
 	ACTION_PARAM_STRING(className, 0);
@@ -858,6 +1029,16 @@ ACTION_FUNCTION(A_SpawnItemEx)
 	fixed y = self->y - fixed(xoffset*finesine[ang])/64 + fixed(yoffset*finecosine[ang])/64;
 	angle = angle_t((angle*ANGLE_45)/45) + self->angle;
 
+	if(flags & SXF_CLIPMAPBOUNDS)
+	{
+		const unsigned int mapwidth = map->GetHeader().width;
+		const unsigned int mapheight = map->GetHeader().height;
+		if(x < 0 || (x >= FLOAT2FIXED(mapwidth)))
+			x = 0;
+		if(y < 0 || (y >= FLOAT2FIXED(mapheight)))
+			y = 0;
+	}
+
 	AActor *newobj = AActor::Spawn(cls, x, y, 0, SPAWN_AllowReplacement);
 
 	if(flags & SXF_TRANSFERPOINTERS)
@@ -867,12 +1048,22 @@ ACTION_FUNCTION(A_SpawnItemEx)
 		if(newobj->flags & FL_ATTACKMODE)
 			newobj->speed = newobj->runspeed;
 	}
+	if (flags & SXF_PROJHITENEMY)
+		newobj->extraflags |= FL_PROJHITENEMY;
 
 	newobj->angle = static_cast<angle_t>(angle);
 
 	//We divide by 128 here since Wolf is 70hz instead of 35.
 	newobj->velx = (fixed(xvel*finecosine[ang]) + fixed(yvel*finesine[ang]))/128;
 	newobj->vely = (-fixed(xvel*finesine[ang]) + fixed(yvel*finecosine[ang]))/128;
+	return true;
+}
+
+ACTION_FUNCTION(A_StartMusic)
+{
+	ACTION_PARAM_STRING(song, 0);
+	map->SetMusic(song);
+	SD_StartMusic(song);
 	return true;
 }
 
@@ -909,6 +1100,21 @@ ACTION_FUNCTION(A_TakeInventory)
 		return true;
 	}
 	return false;
+}
+
+ACTION_FUNCTION(A_UpdateZoneIndex)
+{
+	auto player = players[0].mo;
+	auto spot = map->GetSpot(player->tilex, player->tiley, 0);
+	if (spot && spot->zone)
+	{
+		self->zoneindex = spot->zone->index;
+	}
+	else
+	{
+		self->zoneindex = 0;
+	}
+	return true;
 }
 
 #include "wl_main.h"

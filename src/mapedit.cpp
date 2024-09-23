@@ -44,6 +44,7 @@
 #include "c_dispatch.h"
 #include "v_text.h"
 #include "thingdef/thingdef.h"
+#include "lnspec.h"
 #include "am_map.h"
 #include "uwmfdoc.h"
 using namespace MapEdit;
@@ -190,6 +191,8 @@ void GameMapEditor::ConvertToDoc(const GameMap &map, UwmfDoc::Document &doc)
 		tile.dontOverlay = mapTile.dontOverlay;
 		if (mapTile.mapped != 0)
 			tile.mapped.val() = mapTile.mapped;
+		tile.slideStyle = mapTile.slideStyle;
+		tile.textureFlip = mapTile.textureFlip;
 
 		if (mapTile.soundSequence.IsValidName() &&
 			mapTile.soundSequence != NAME_None)
@@ -269,7 +272,8 @@ void GameMapEditor::ConvertToDoc(const GameMap &map, UwmfDoc::Document &doc)
 					trigger.x = x;
 					trigger.y = y;
 					trigger.z = z;
-					trigger.action = mapTrigger.action;
+					trigger.action = Specials::LookupFunctionName(
+							static_cast<Specials::LineSpecials>(mapTrigger.action));
 					trigger.arg0 = mapTrigger.arg[0];
 					trigger.arg1 = mapTrigger.arg[1];
 					trigger.arg2 = mapTrigger.arg[2];
@@ -303,6 +307,7 @@ void GameMapEditor::ConvertToDoc(const GameMap &map, UwmfDoc::Document &doc)
 		thing.z = static_cast<double>(mapThing.z) / FRACUNIT;
 		thing.angle = mapThing.angle;
 		thing.ambush = mapThing.ambush;
+		thing.patrol = mapThing.patrol;
 		thing.skill1 = mapThing.skill[0];
 		thing.skill2 = mapThing.skill[1];
 		thing.skill3 = mapThing.skill[2];
@@ -444,6 +449,32 @@ public:
 		}
 
 		spot->sector = sector;
+		return true;
+	}
+};
+
+class FCVar_me_zone : public FDynamicCVarAccess<int>
+{
+public:
+	int GetValue() const
+	{
+		MapSpot spot = mapeditor->GetCurSpot();
+		return (spot != NULL && spot->zone != NULL ?
+			spot->zone->index : -1);
+	}
+
+	bool SetValue(int value) const
+	{
+		const MapZone *zone = &map->GetZone(value);
+
+		MapSpot spot = mapeditor->GetCurSpot();
+		if (spot == NULL)
+		{
+			Printf(TEXTCOLOR_RED " Invalid spot!\n");
+			return false;
+		}
+
+		spot->zone = zone;
 		return true;
 	}
 };
@@ -688,6 +719,7 @@ public:
 
 DYNAMIC_CVAR (Int, me_tile, 0, CVAR_NOFLAGS)
 DYNAMIC_CVAR (Int, me_sector, 0, CVAR_NOFLAGS)
+DYNAMIC_CVAR (Int, me_zone, 0, CVAR_NOFLAGS)
 DYNAMIC_CVAR (String, me_thingtype, "", CVAR_NOFLAGS)
 DYNAMIC_CVAR (Int, me_thingangle, false, CVAR_NOFLAGS)
 DYNAMIC_CVAR (Bool, me_thingambush, false, CVAR_NOFLAGS)

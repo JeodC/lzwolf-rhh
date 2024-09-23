@@ -48,6 +48,7 @@
 #include "thingdef/thingdef.h"
 #include "wl_game.h"
 #include "c_dispatch.h"
+#include "r_data/colormaps.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 // MapInfoBlockParser
@@ -274,7 +275,7 @@ static LevelInfo defaultMap;
 static TArray<LevelInfo> levelInfos;
 
 LevelInfo::LevelInfo() : ResetHealth(false), ResetInventory(false),
-	UseMapInfoName(false)
+	FullBrightInhibit(false), CMapStart(nullptr), UseMapInfoName(false)
 {
 	MapName[0] = 0;
 	TitlePatch.SetInvalid();
@@ -299,15 +300,21 @@ LevelInfo::LevelInfo() : ResetHealth(false), ResetInventory(false),
 	ForceTally = false;
 	HighScoresGraphic.SetInvalid();
 	NumParallaxTiles = 0;
+	ParallaxDecals = false;
 	ClearAtmos();
 }
 
 FTextureID LevelInfo::GetBorderTexture() const
 {
 	static FTextureID BorderFlat = TexMan.GetTexture(gameinfo.BorderFlat, FTexture::TEX_Flat);
-	if(!BorderTexture.isValid())
+	static FTextureID BorderPic = TexMan.GetTexture(gameinfo.BorderPic, FTexture::TEX_Flat);
+	if(!BorderTexture.isValid() && !BorderPic.isValid())
 		return BorderFlat;
-	return BorderTexture;
+	if(!BorderPic.isValid())
+		return BorderTexture;
+	FTexture *borderPicTex = TexMan(BorderPic);
+	borderPicTex->bStretchFill = true;
+	return BorderPic;
 }
 
 FString LevelInfo::GetMusic(const GameMap *gm) const
@@ -509,6 +516,16 @@ protected:
 		}
 		else if(key.CompareNoCase("DeathCam") == 0)
 			ParseBoolAssignment(mapInfo.DeathCam);
+		else if(key.CompareNoCase("FadeCMap") == 0)
+		{
+			FString cmapName;
+			ParseStringAssignment(cmapName);
+			const char* str = cmapName.GetChars();
+			mapInfo.FadeCMapName = FName(str);
+			const DWORD colormapnum = R_ColormapNumForName(str);
+			mapInfo.CMapStart = (colormapnum != 0 ?
+				&realcolormaps[colormapnum*256*NUMCOLORMAPS] : nullptr);
+		}
 		else if(key.CompareNoCase("FloorNumber") == 0)
 		{
 			sc.MustGetToken('=');
@@ -522,6 +539,8 @@ protected:
 		}
 		else if(key.CompareNoCase("ForceTally") == 0)
 			ParseBoolAssignment(mapInfo.ForceTally);
+		else if(key.CompareNoCase("FullBrightInhibit") == 0)
+			ParseBoolAssignment(mapInfo.FullBrightInhibit);
 		else if(key.CompareNoCase("HighScoresGraphic") == 0)
 		{
 			FString texName;
@@ -578,6 +597,8 @@ protected:
 		}
 		else if(key.CompareNoCase("NumParallaxTiles") == 0)
 			ParseIntAssignment(mapInfo.NumParallaxTiles);
+		else if(key.CompareNoCase("ParallaxDecals") == 0)
+			ParseBoolAssignment(mapInfo.ParallaxDecals);
 		else if(key.CompareNoCase("AtmosStarSky") == 0)
 			ParseIntAssignment(mapInfo.Atmos[0]);
 		else if(key.CompareNoCase("AtmosRain") == 0)
@@ -586,8 +607,17 @@ protected:
 			ParseIntAssignment(mapInfo.Atmos[2]);
 		else if(key.CompareNoCase("AtmosHqStarSky") == 0)
 			ParseIntAssignment(mapInfo.Atmos[3]);
+		else if(key.CompareNoCase("AtmosHqSnow") == 0)
+			ParseIntAssignment(mapInfo.Atmos[4]);
 		else if(key.CompareNoCase("Intermission") == 0)
 			ParseStringAssignment(mapInfo.Intermission);
+		else if(key.CompareNoCase("FootSplash") == 0)
+		{
+			FString fstr;
+			ParseStringAssignment(fstr);
+			const char* str = fstr.GetChars();
+			mapInfo.FootSplash = FName(str);
+		}
 		else
 			return false;
 		return true;
@@ -600,6 +630,7 @@ GameInfo gameinfo;
 
 GameInfo::GameInfo() : PageIndexText("pg %d of %d")
 {
+	DropItemTileSize = FRACUNIT;
 }
 
 class GameInfoBlockParser : public MapInfoBlockParser
@@ -614,6 +645,8 @@ protected:
 			ParseColorAssignment(gameinfo.AdvisoryColor);
 		else if(key.CompareNoCase("advisorypic") == 0)
 			ParseStringAssignment(gameinfo.AdvisoryPic);
+		else if(key.CompareNoCase("authorcreditpic") == 0)
+			ParseStringAssignment(gameinfo.AuthorCreditPic);
 		else if(key.CompareNoCase("armoricons") == 0)
 		{
 			sc.MustGetToken('=');
@@ -681,6 +714,8 @@ protected:
 		}
 		else if(key.CompareNoCase("borderflat") == 0)
 			ParseStringAssignment(gameinfo.BorderFlat);
+		else if(key.CompareNoCase("borderpic") == 0)
+			ParseStringAssignment(gameinfo.BorderPic);
 		else if(key.CompareNoCase("deathtransition") == 0)
 		{
 			sc.MustGetToken('=');
@@ -696,6 +731,12 @@ protected:
 			ParseFontColorAssignment(gameinfo.FontColors[GameInfo::DIALOG]);
 		else if(key.CompareNoCase("doorsoundsequence") == 0)
 			ParseNameAssignment(gameinfo.DoorSoundSequence);
+		else if(key.CompareNoCase("dropitemtilesize") == 0)
+		{
+			sc.MustGetToken('=');
+			sc.MustGetToken(TK_FloatConst);
+			gameinfo.DropItemTileSize = static_cast<fixed>(sc->decimal*FRACUNIT);
+		}
 		else if(key.CompareNoCase("drawreadthis") == 0)
 			ParseBoolAssignment(gameinfo.DrawReadThis);
 		else if(key.CompareNoCase("drawgamemessage") == 0)
@@ -813,6 +854,10 @@ protected:
 			ParseColorAssignment(gameinfo.parallaxskyfloorcolor);
 		else if(key.CompareNoCase("parallaxskyceilcolor") == 0)
 			ParseColorAssignment(gameinfo.parallaxskyceilcolor);
+		else if(key.CompareNoCase("gamelanguage") == 0)
+			ParseStringAssignment(gameinfo.GameLanguage);
+		else if(key.CompareNoCase("walldecalcolor") == 0)
+			ParseColorAssignment(gameinfo.walldecalcolor);
 		else
 			return false;
 		return true;

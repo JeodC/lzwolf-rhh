@@ -65,6 +65,9 @@ int DebugKeys (void);
 
 void ScalePost();
 
+EXTERN_CVAR (Int, godmode)
+EXTERN_CVAR (Bool, notargetmode)
+
 /*
 =============================================================================
 
@@ -269,7 +272,7 @@ int DebugKeys (void)
 		VW_UpdateScreen();
 		IN_Ack();
 		if (godmode != 2)
-			godmode++;
+			godmode = godmode + 1;
 		else
 			godmode = 0;
 		return 1;
@@ -620,7 +623,7 @@ void DebugGod(bool noah)
 		}
 	}
 
-	godmode ^= 1;
+	godmode = godmode ^ 1;
 
 	IN_ClearKeysDown ();
 	IN_Ack ();
@@ -655,7 +658,7 @@ CCMD (god)
 	if (new_godmode == -1)
 	{
 		if (godmode != 2)
-			godmode++;
+			godmode = godmode + 1;
 		else
 			godmode = 0;
 	}
@@ -756,4 +759,17 @@ CCMD (map)
 	strncpy(gamestate.mapname, mapname, 8);
 	gamestate.mapname[8] = 0;
 	playstate = ex_warped;
+}
+
+CCMD (givepoints)
+{
+	if (argv.argc() < 2)
+	{
+		Printf ("Usage: givepoints <points>\n");
+		return;
+	}
+
+	int points = atoi(argv[1]);
+	players[0].GivePoints (points);
+	StatusBar->DrawStatusBar();
 }

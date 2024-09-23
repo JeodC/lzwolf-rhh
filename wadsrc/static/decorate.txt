@@ -3,6 +3,7 @@
 #include "actors/patrolpoint.txt"
 #include "actors/wolf/wolfguards.txt"
 #include "actors/wolf/angelofdeath.txt"
+#include "actors/wolf/dust.txt"
 #include "actors/wolf/decorations.txt"
 #include "actors/wolf/hitler.txt"
 #include "actors/wolf/rocket.txt"
@@ -39,3 +40,4 @@
 #include "actors/blake/blakeplayer.txt"
 #include "actors/blake/blakeweapons.txt"
 #include "actors/doom/doomarmor.txt"
+#include "actors/wolf/wolftest.txt"

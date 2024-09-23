@@ -65,8 +65,13 @@ enum
 	AMETA_DamageResistances,
 	AMETA_HaloLights,
 	AMETA_ZoneLights,
+	AMETA_FilterposWraps,
+	AMETA_FilterposThrusts,
+	AMETA_FilterposWaves,
 	AMETA_EnemyFactions,
+	AMETA_InterrogateItems,
 	AMETA_PickupMessage,
+	AMETA_InfoMessage,
 	AMETA_Obituary,			// string (player was killed by this actor)
 	AMETA_HitObituary,		// string (player was killed by this actor in melee)
 };
@@ -79,6 +84,16 @@ enum
 
 typedef TFlags<ActorFlag> ActorFlags;
 DEFINE_TFLAGS_OPERATORS (ActorFlags)
+
+namespace FilterposThrustSource
+{
+	enum e
+	{
+		forwardThrust,
+		sideThrust,
+		rotation,
+	};
+}
 
 typedef TFlags<ExtraActorFlag> ExtraActorFlags;
 DEFINE_TFLAGS_OPERATORS (ExtraActorFlags)
@@ -138,6 +153,7 @@ class AActor : public Thinker,
 				int             id;
 				int             light;
 				double          radius;
+				const ClassDef  *littype;
 		};
 		typedef LinkedList<HaloLight> HaloLightList;
 
@@ -145,9 +161,39 @@ class AActor : public Thinker,
 		{
 			public:
 				int             id;
-				int             light;
+				int             light = 0;
+				const ClassDef  *littype = nullptr;
 		};
 		typedef LinkedList<ZoneLight> ZoneLightList;
+
+		struct FilterposWrap
+		{
+			public:
+				int             id;
+				double          x1,x2;
+				unsigned int    axis;
+		};
+		typedef LinkedList<FilterposWrap> FilterposWrapList;
+
+		struct FilterposThrust
+		{
+			public:
+				int             id;
+				unsigned int    axis;
+				FilterposThrustSource::e src;
+		};
+		typedef LinkedList<FilterposThrust> FilterposThrustList;
+
+		struct FilterposWave
+		{
+			public:
+				int             id;
+				unsigned int    axis;
+				double          amplitude;
+				double          period;
+				int             usesine;
+		};
+		typedef LinkedList<FilterposWave> FilterposWaveList;
 
 		struct EnemyFaction
 		{
@@ -155,6 +201,18 @@ class AActor : public Thinker,
 				const ClassDef  *faction;
 		};
 		typedef LinkedList<EnemyFaction> EnemyFactionList;
+
+		struct InterrogateItem
+		{
+			public:
+				unsigned int    id;
+				FString			infoMessage;
+				FName           dropItem;
+				int             probability;
+				int             minAmount;
+				int             maxAmount;
+		};
+		typedef LinkedList<InterrogateItem> InterrogateItemList;
 
 		void			AddInventory(AInventory *item);
 		virtual void	BeginPlay() {}
@@ -177,7 +235,11 @@ class AActor : public Thinker,
 		DamageResistanceList		*GetDamageResistanceList() const;
 		HaloLightList		*GetHaloLightList() const;
 		ZoneLightList		*GetZoneLightList() const;
+		FilterposWrapList		*GetFilterposWrapList() const;
+		FilterposThrustList		*GetFilterposThrustList() const;
+		FilterposWaveList		*GetFilterposWaveList() const;
 		EnemyFactionList		*GetEnemyFactionList() const;
+		InterrogateItemList		*GetInterrogateItemList() const;
 		const MapZone	*GetZone() const { return soundZone; }
 		bool			GiveInventory(const ClassDef *cls, int amount=0, bool allowreplacement=true);
 		bool			InStateSequence(const Frame *basestate) const;
@@ -197,8 +259,14 @@ class AActor : public Thinker,
 
 		virtual void	Tick();
 		virtual void	Touch(AActor *toucher) {}
+		virtual const char *InfoMessage ();
+
+		void            ApplyFilterpos (FilterposWrap wrap);
+		void            ApplyFilterpos (FilterposThrust thrust);
+		void            ApplyFilterpos (FilterposWave wave);
 
 		fixed           &GetCoordRef (unsigned int axis);
+		fixed           &GetFilterposWaveOldDelta (int id);
 
 		void PrintInventory();
 
@@ -207,7 +275,11 @@ class AActor : public Thinker,
 		static PointerIndexTable<DamageResistanceList> damageResistances;
 		static PointerIndexTable<HaloLightList> haloLights;
 		static PointerIndexTable<ZoneLightList> zoneLights;
+		static PointerIndexTable<FilterposWrapList> filterposWraps;
+		static PointerIndexTable<FilterposThrustList> filterposThrusts;
+		static PointerIndexTable<FilterposWaveList> filterposWaves;
 		static PointerIndexTable<EnemyFactionList> enemyFactions;
+		static PointerIndexTable<InterrogateItemList> interrogateItems;
 
 		// Spawned actor ID
 		unsigned int spawnid;
@@ -220,6 +292,7 @@ class AActor : public Thinker,
 
 		int32_t	distance; // if negative, wait for that door to open
 		dirtype	dir;
+		uint8_t	trydir;
 
 #pragma pack(push, 1)
 // MSVC and older versions of GCC don't support constant union parts
@@ -260,6 +333,7 @@ class AActor : public Thinker,
 		fixed	radius;
 		fixed	projectilepassheight;
 		int     loaded;
+		int     zoneindex;
 
 		const Frame		*state;
 		unsigned int	sprite;
@@ -290,8 +364,23 @@ class AActor : public Thinker,
 		int         picX, picY;
 		int         haloLightMask;
 		int         zoneLightMask;
+		const ClassDef  *litfilter;
 		int         singlespawn;
+		int         interrogateItemsUsed;
+		struct
+		{
+			uint8_t ammo;
+			uint8_t s_tilex;
+			uint8_t s_tiley;
+		} informant;
+		fixed       DamageFactor;
 
+		struct FilterposWaveLastMove
+		{
+			int id;
+			fixed delta;
+		};
+		TArray<FilterposWaveLastMove> filterposwaveLastMoves;
 		const ClassDef  *faction;
 		std::pair<bool,unsigned int> spawnThingNum;
 		int			activationtype;	// How the thing behaves when activated with USESPECIAL or BUMPSPECIAL
@@ -300,6 +389,14 @@ class AActor : public Thinker,
 		player_t	*player;	// Only valid with APlayerPawn
 
 		TObjPtr<AActor> missileParent;
+		int		PatrolFilterKey;
+		bool	PendingPatrolChange;
+		angle_t	PendingPatrolAngle;
+		dirtype	PendingPatrolDir;
+
+		int		UseTriggerFilterKey;
+		bool	FlipSprite;
+		std::pair<bool,int>	TwoSidedRotate;
 
 		TObjPtr<AInventory>	inventory;
 
@@ -340,6 +437,37 @@ public:
 	void Serialize(FArchive &arc);
 
 	TObjPtr<AActor> actualObject;
+};
+
+class ALit : public AActor
+{
+	DECLARE_NATIVE_CLASS(Lit, Actor)
+
+	public:
+		const ClassDef	*GetLitType() const;
+};
+
+class APatrolPoint : public AActor
+{
+	DECLARE_NATIVE_CLASS(PatrolPoint, Actor)
+
+	public:
+		FNameNoInit		TargetState;
+		bool			DeferChange;
+
+		virtual void Serialize (FArchive &arc);
+		void Touch(AActor *toucher);
+};
+
+class ACollateral : public AActor
+{
+	DECLARE_NATIVE_CLASS(Collateral, Actor)
+
+	public:
+		double		HitRadius;
+		int			HitChance;
+
+		const ClassDef	*GetCollateralType() const;
 };
 
 namespace ActorSpawnID

@@ -19,6 +19,7 @@
 #include "m_random.h"
 #include "g_mapinfo.h"
 #include "thinker.h"
+#include "r_sprites.h"
 #include "wl_draw.h"
 #include "wl_game.h"
 #include "wl_iwad.h"
@@ -67,6 +68,11 @@ player_t		players[MAXPLAYERS];
 void ClipMove (AActor *ob, int32_t xmove, int32_t ymove);
 static void Thrust (APlayerPawn *player, angle_t angle, int32_t speed);
 
+int ApplyMobjDamageFactor(int damage, const FName &damagetype,
+		const DmgFactors *factors);
+
+EXTERN_CVAR (Int, godmode)
+
 /*
 =============================================================================
 
@@ -78,6 +84,9 @@ static void Thrust (APlayerPawn *player, angle_t angle, int32_t speed);
 DBaseStatusBar *StatusBar;
 
 DBaseStatusBar *CreateStatusBar_Blake();
+#ifdef USE_GPL
+DBaseStatusBar *CreateStatusBar_BlakeAOG();
+#endif
 DBaseStatusBar *CreateStatusBar_Wolf3D();
 
 void DestroyStatusBar() { delete StatusBar; }
@@ -85,6 +94,10 @@ void CreateStatusBar()
 {
 	if(IWad::CheckGameFilter("Blake"))
 		StatusBar = CreateStatusBar_Blake();
+#ifdef USE_GPL
+	else if(IWad::CheckGameFilter("BlakeAOG"))
+		StatusBar = CreateStatusBar_BlakeAOG();
+#endif
 	else
 		StatusBar = CreateStatusBar_Wolf3D();
 	atterm(DestroyStatusBar);
@@ -149,6 +162,47 @@ void CheckWeaponChange (AActor *self)
 
 
 /*
+======================
+=
+= ThrustTracker
+=
+======================
+*/
+namespace ThrustTracker
+{
+	TVector2<double> p0;
+	int32_t	a0;
+
+	void Start (APlayerPawn *ob)
+	{
+		ob->forwardthrust = 0;
+		ob->sidethrust = 0;
+		ob->rotthrust = 0;
+		p0 = TVector2<double>(FIXED2FLOAT(ob->x), FIXED2FLOAT(ob->y));
+		a0 = ob->angle>>ANGLETOFINESHIFT;
+	}
+
+	void Finish (APlayerPawn *ob)
+	{
+		const TVector2<double> p1(FIXED2FLOAT(ob->x), FIXED2FLOAT(ob->y));
+
+		const TVector2<double> fwd(FIXED2FLOAT(viewcos), -FIXED2FLOAT(viewsin));
+		const TVector2<double> side = fwd.Rotated90CCW();
+
+		ob->forwardthrust = FLOAT2FIXED((p1-p0)|fwd);
+		ob->sidethrust = FLOAT2FIXED((p1-p0)|side);
+
+		const int32_t a1 = (int32_t)(ob->angle>>ANGLETOFINESHIFT);
+
+		int32_t a = a1 - a0;
+		a += (a>(FINEANGLES/2)) ? -FINEANGLES : (a<-(FINEANGLES/2)) ? FINEANGLES : 0;
+
+		ob->rotthrust = a;
+	}
+}
+
+
+/*
 =======================
 =
 = ControlMovement
@@ -173,6 +227,7 @@ void ControlMovement (APlayerPawn *ob)
 	int strafe = controlstrafe;
 
 	ob->player->thrustspeed = 0;
+	ThrustTracker::Start (ob);
 
 	oldx = ob->x;
 	oldy = ob->y;
@@ -249,6 +304,29 @@ void ControlMovement (APlayerPawn *ob)
 	{
 		if(ob->SeeState && ob->InStateSequence(ob->SpawnState))
 			ob->SetState(ob->SeeState);
+
+		const auto& lastbob = ob->player->lastbob;
+		if (lastbob.step && map->IsValidTileCoordinate(ob->tilex, ob->tiley, 0))
+		{
+			auto get_footsplash_cls = [](auto name) {
+				const ClassDef *cls = nullptr;
+				if (name != NAME_None && name.IsValidName())
+				{
+					cls = ClassDef::FindClass(name);
+				}
+				return cls;
+			};
+
+			const MapSpot spot = map->GetSpot(ob->tilex, ob->tiley, 0);
+			const ClassDef *cls = nullptr;
+			if ((spot->sector != nullptr && (cls =
+							get_footsplash_cls(spot->sector->footSplash))) ||
+				(cls = get_footsplash_cls(levelInfo->FootSplash)))
+			{
+				auto splashobj = AActor::Spawn(cls, ob->x, ob->y, 0,
+						SPAWN_AllowReplacement);
+			}
+		}
 	}
 	else
 	{
@@ -258,6 +336,8 @@ void ControlMovement (APlayerPawn *ob)
 
 	if (gamestate.victoryflag)              // watching the BJ actor
 		return;
+	
+	ThrustTracker::Finish (ob);
 }
 
 /*
@@ -319,6 +399,19 @@ void player_t::TakeDamage (int points, AActor *attacker, const ClassDef  *damage
 	// fix for baby mode
 	if (points <= 0 && damage > 0)
 		points = 1;
+
+	if(ReadyWeapon)
+	{
+		if(points > 0)
+		{
+			points = FixedMul(points, ReadyWeapon->DamageFactor);
+			if(points > 0 && damagetype != nullptr)
+				points = ApplyMobjDamageFactor(points,
+						damagetype->GetName(),
+						ReadyWeapon->GetClass()->DamageFactors);
+		}
+	}
+
 	NetDPrintf("%s %d points\n", __FUNCTION__, points);
 
 	if (points > 0 && mo->inventory)
@@ -327,6 +420,16 @@ void player_t::TakeDamage (int points, AActor *attacker, const ClassDef  *damage
 		mo->inventory->AbsorbDamage(points,
 			damagetype ? damagetype->GetName() : FName(), newdam);
 		points = newdam;
+	}
+
+	if (attacker)
+	{
+		auto infomessage = attacker->InfoMessage();
+		if (infomessage != NULL)
+		{
+			auto infomsg_texids = R_GetAttackingFrames(attacker);
+			StatusBar->InfoMessage(infomessage, infomsg_texids);
+		}
 	}
 
 	if (!godmode)
@@ -547,7 +650,7 @@ void ClipMove (AActor *ob, int32_t xmove, int32_t ymove)
 	}
 
 	if (!SD_SoundPlaying())
-		SD_PlaySound ("world/hitwall");
+		SD_PlaySound ("world/hitwall", SD_BOSSWEAPONS);
 
 	ob->x = basex+xmove;
 	ob->y = basey;
@@ -660,6 +763,7 @@ void APlayerPawn::Cmd_Use()
 	bool doNothing = true;
 	bool isRepeatable = false;
 	BYTE lastTrigger = 0;
+	FString infoMessage;
 	MapSpot spot = map->GetSpot(checkx, checky, 0);
 	for(unsigned int i = 0;i < spot->triggers.Size();++i)
 	{
@@ -670,15 +774,165 @@ void APlayerPawn::Cmd_Use()
 			{
 				isRepeatable |= trig.repeatable;
 				lastTrigger = trig.action;
+				infoMessage = trig.infoMessage;
 				doNothing = false;
 			}
 		}
 	}
 
-	if(doNothing)
-		SD_PlaySound ("misc/do_nothing");
+	TicCmd_t &cmd = control[player - players];
+	if(doNothing && (!cmd.buttonheld[bt_use] && Interrogate()))
+	{
+		SD_PlaySound ("scientist/interrogate");
+		cmd.buttonheld[bt_use] = true;
+	}
+	else if(doNothing)
+	{
+		SD_PlaySound ("misc/do_nothing", SD_ADLIB);
+	}
 	else
+	{
+		if(!infoMessage.IsEmpty())
+			StatusBar->InfoMessage(infoMessage);
 		P_ChangeSwitchTexture(spot, static_cast<MapTile::Side>(direction), isRepeatable, lastTrigger);
+	}
+}
+
+/*
+===============
+=
+= Interrogate
+=
+===============
+*/
+
+static FRandom pr_interrogateitem("InterrogateItem");
+bool APlayerPawn::Interrogate()
+{
+	const double range = 64;
+
+	int dist = 0x7fffffff;
+	AActor *closest = NULL;
+	for(AActor::Iterator check = AActor::GetIterator();check.Next();)
+	{
+		if(check == this)
+			continue;
+
+		if ( (check->flags & FL_SHOOTABLE) && (check->flags & FL_VISABLE)
+			&& abs(check->viewx-centerx) < shootdelta &&
+			(check->extraflags & FL_FRIENDLY) != 0)
+		{
+			if (check->transx < dist)
+			{
+				dist = check->transx;
+				closest = check;
+			}
+		}
+	}
+
+	if (!closest || dist-(FRACUNIT/2) > (range/64)*FRACUNIT)
+	{
+		// missed
+		return false;
+	}
+	// hit something
+
+	// prioritise one of the interrogation items above the others at random
+	std::vector<InterrogateItem> prbItems;
+	bool chosenRandom = false;
+	auto rndval = pr_interrogateitem();
+
+	typedef AActor::InterrogateItemList Li;
+	Li *li = closest->GetInterrogateItemList();
+	if (li)
+	{
+		Li::Iterator item = li->Head();
+		do
+		{
+			Li::Iterator interrogateItem = item;
+
+			if(rndval >= 0 && rndval <= interrogateItem->probability)
+			{
+				rndval = -1;
+				prbItems.insert(std::begin(prbItems), interrogateItem);
+			}
+			else
+			{
+				prbItems.push_back(interrogateItem);
+			}
+		}
+		while(item.Next());
+	}
+
+	// first try to get an item which gives inventory
+	for(auto interrogateItem: prbItems)
+	{
+		const auto usedMask = (1 << interrogateItem.id);
+
+		const auto amtmin = interrogateItem.minAmount;
+		const auto amtmax = interrogateItem.maxAmount;
+		const auto amount = amtmin + (amtmax > amtmin ?
+				pr_interrogateitem(amtmax - amtmin) : 0);
+
+		const ClassDef *cls = ClassDef::FindClass(interrogateItem.dropItem);
+		if((closest->interrogateItemsUsed & usedMask) == 0 &&
+				cls && cls->IsDescendantOf(NATIVE_CLASS(Inventory)) &&
+				GiveInventory(cls, amount))
+		{
+			closest->interrogateItemsUsed |= usedMask;
+			StatusBar->InfoMessage(interrogateItem.infoMessage);
+			return true;
+		}
+	}
+
+	// now try to get an item which does not give inventory
+	for(auto interrogateItem: prbItems)
+	{
+		const auto usedMask = (1 << interrogateItem.id);
+		const auto amount = interrogateItem.minAmount;
+
+		const ClassDef *cls = ClassDef::FindClass(interrogateItem.dropItem);
+		if((closest->interrogateItemsUsed & usedMask) == 0 && !cls &&
+				interrogateItem.minAmount == 0 && interrogateItem.maxAmount == 0)
+		{
+			const char *msgptr = nullptr;
+
+			std::string msg = interrogateItem.infoMessage.GetChars();
+			auto informantKey = "${INFMSG}";
+			auto scientistKey = "${SCIMSG}";
+			auto key = std::string{};
+
+			if(msg.find(informantKey) != std::string::npos)
+			{
+				key = informantKey;
+#ifdef USE_GPL
+				msgptr = map->GetInformantMessage(closest, pr_interrogateitem);
+#endif
+			}
+			else if(msg.find(scientistKey) != std::string::npos)
+			{
+				key = scientistKey;
+#ifdef USE_GPL
+				msgptr = map->GetScientistMessage(closest, pr_interrogateitem);
+#endif
+			}
+
+			if(msgptr != nullptr)
+			{
+				closest->interrogateItemsUsed |= usedMask;
+
+				auto n = msg.find(key);
+				assert(n != std::string::npos);
+				msg.erase(n, key.length());
+				msg.insert(n, msgptr);
+
+				StatusBar->InfoMessage(msg.c_str());
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 /*
@@ -908,6 +1162,11 @@ size_t player_t::PropagateMark()
 	GC::Mark(ReadyWeapon);
 	if(PendingWeapon != WP_NOCHANGE)
 		GC::Mark(PendingWeapon);
+
+	std::size_t i;
+	for(i = 0; i < weaponSlotStates.size(); i++)
+		GC::Mark(weaponSlotStates[i].LastWeapon);
+
 	return sizeof(*this);
 }
 
@@ -917,6 +1176,8 @@ void player_t::Reborn()
 	PendingWeapon = WP_NOCHANGE;
 	flags = 0;
 	FOV = DesiredFOV;
+	std::fill(std::begin(weaponSlotStates), std::end(weaponSlotStates),
+			WeaponSlotState{});
 
 	if(state == PST_ENTER)
 	{
@@ -935,6 +1196,15 @@ void player_t::Reborn()
 FArchive &operator<< (FArchive &arc, player_t::WeaponSlotState &player)
 {
 	arc << player.LastWeapon;
+	return arc;
+}
+
+FArchive &operator<< (FArchive &arc,
+		player_t::TWeaponSlotStates &weaponSlotStates)
+{
+	std::size_t i;
+	for(i = 0; i < weaponSlotStates.size(); i++)
+		arc << weaponSlotStates[i];
 	return arc;
 }
 
@@ -970,6 +1240,11 @@ void player_t::Serialize(FArchive &arc)
 		<< heightanim.ticcount
 		<< heightanim.startpos
 		<< heightanim.endpos;
+
+	arc << lastbob.dir
+		<< lastbob.step
+		<< lastbob.value
+		<< lastbob.inhibitstep;
 
 	if(GameSave::SaveProdVersion >= 0x001002FF && GameSave::SaveVersion > 1374729160)
 		arc << FOV << DesiredFOV;
@@ -1158,7 +1433,7 @@ ACTION_FUNCTION(A_CustomPunch)
 		range = 64;
 
 	if(!(player->ReadyWeapon->weaponFlags & WF_NOALERT))
-		madenoise = true;
+		madenoise = 1;
 
 	// actually fire
 	int dist = 0x7fffffff;
@@ -1247,7 +1522,7 @@ ACTION_FUNCTION(A_GunAttack)
 		self->SetState(self->MeleeState);
 
 	if(!(player->ReadyWeapon->weaponFlags & WF_NOALERT))
-		madenoise = true;
+		madenoise = 1;
 
 	AActor *closest = player->FindTarget();
 	if(!closest)
@@ -1288,7 +1563,7 @@ ACTION_FUNCTION(A_FireCustomMissile)
 		return false;
 
 	if(!(self->player->ReadyWeapon->weaponFlags & WF_NOALERT))
-		madenoise = true;
+		madenoise = 1;
 
 	if(self->MeleeState)
 		self->SetState(self->MeleeState);

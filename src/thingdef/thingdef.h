@@ -39,6 +39,7 @@
 #include "tarray.h"
 #include "wl_def.h"
 #include "zstring.h"
+#include <map>
 
 class ClassDef;
 class Frame;
@@ -243,6 +244,19 @@ class MetaTable
 		void	FreeTable();
 };
 
+struct DmgFactors : public std::map<std::string, fixed>
+{
+	const fixed *CheckFactor(const std::string& type) const
+	{
+		auto it = find( type );
+		if( it == end() && type != "None" )
+		{
+			it = find( "None" );
+		}
+		return ( it != end() ? &it->second : nullptr );
+	}
+};
+
 class ClassDef
 {
 	public:
@@ -304,14 +318,20 @@ class ClassDef
 		const FName				&GetName() const { return name; }
 		const ClassDef			*GetParent() const { return parent; }
 		const ClassDef			*GetReplacement(bool respectMapinfo=true) const;
+		int						GetReplacementPrb() const { return replacementPrb; }
 		size_t					GetSize() const { return size; }
 		const Frame				*GetState(unsigned int index) const { return &frameList[index]; }
 		static void				LoadActors();
 		bool					IsStateOwner(const Frame *frame) const { return frame >= &frameList[0] && frame < &frameList[frameList.Size()]; }
 		static void				UnloadActors();
+		int                     GetNextFilterposId ();
 
 		unsigned int			ClassIndex;
 		MetaTable				Meta;
+		DmgFactors              *DamageFactors;
+		FName                   FadeCMapName;
+		bool                    FullBrightInhibit;
+		const BYTE              *CMapStart;
 
 		static bool	SetFlag(const ClassDef *newClass, AActor *instance, const FString &prefix, const FString &flagName, bool set);
 
@@ -345,6 +365,7 @@ class ClassDef
 
 		const ClassDef	*replacement;
 		const ClassDef	*replacee;
+		int             replacementPrb;
 
 		TMap<FName, unsigned int> stateList;
 		TArray<Frame> frameList;
@@ -359,6 +380,7 @@ class ClassDef
 		DObject			*(*ConstructNative)(const ClassDef *, void *);
 
 		static bool		bShutdown;
+		int             filterposRunningId;
 };
 
 // Functions below are actually a part of dobject.h, but moved here for dependency reasons

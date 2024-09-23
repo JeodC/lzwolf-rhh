@@ -207,14 +207,17 @@ bool GameMap::ActivateTrigger(Trigger &trig, Trigger::Side direction, AActor *ac
 	MapSpot spot = GetSpot(trig.x, trig.y, trig.z);
 
 	Specials::LineSpecialFunction func = Specials::LookupFunction(Specials::LineSpecials(trig.action));
-	bool ret = func(spot, trig.arg, direction, activator) != 0;
+	auto ret = func(spot, trig.arg, direction, activator);
 	if(ret)
 	{
 		if(trig.active && trig.isSecret)
 			++gamestate.secretcount;
-		trig.active = false;
+		if(ret != 2)
+		{
+			trig.active = false;
+		}
 	}
-	return ret;
+	return (ret != 0);
 }
 
 void GameMap::ClearVisibility()
@@ -547,11 +550,13 @@ void GameMap::SpawnThings() const
 				cls = unknownClass;
 				printf("Unknown thing %s @ (%d, %d)\n", thing.type.GetChars(), thing.x>>FRACBITS, thing.y>>FRACBITS);
 			}
+			//fprintf(stderr, "%s\n", cls->GetName().GetChars());
 
 			AActor *actor = AActor::Spawn(cls, thing.x, thing.y, thing.z, SPAWN_AllowReplacement|(thing.patrol ? SPAWN_Patrol : 0));
 			// This forumla helps us to avoid errors in roundoffs.
 			actor->angle = (thing.angle/45)*ANGLE_45 + (thing.angle%45)*ANGLE_1;
 			actor->dir = nodir;
+			actor->trydir = nodir;
 			if(thing.ambush)
 				actor->flags |= FL_AMBUSH;
 			if(thing.patrol)
@@ -559,6 +564,8 @@ void GameMap::SpawnThings() const
 			if(thing.holo)
 				actor->flags &= ~(FL_SOLID);
 			actor->spawnThingNum = std::make_pair(true, i);
+			if(thing.numdirs == 4)
+				actor->TwoSidedRotate = std::make_pair(true, thing.dir4ind);
 
 			// you can score 100% kills/treasure again in this level if a new
 			// actor is spawned that counts towards the statistic
@@ -656,7 +663,8 @@ FArchive &operator<< (FArchive &arc, GameMap *&gm)
 	arc << gm->header.name
 		<< gm->header.width
 		<< gm->header.height
-		<< gm->header.tileSize;
+		<< gm->header.tileSize
+		<< gm->header.music;
 
 	// zoneLinks
 	if(GameSave::SaveVersion >= 1383348286)
@@ -881,6 +889,7 @@ FArchive &operator<< (FArchive &arc, MapTrigger &trigger)
 		<< trigger.playerUse
 		<< trigger.playerCross
 		<< trigger.monsterUse
+		<< trigger.monsterUseFilter
 		<< trigger.isSecret
 		<< trigger.repeatable;
 

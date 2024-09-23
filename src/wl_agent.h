@@ -1,6 +1,8 @@
 #ifndef __WL_AGENT__
 #define __WL_AGENT__
 
+#include <vector>
+#include <array>
 #include "wl_def.h"
 #include "a_playerpawn.h"
 #include "weaponslots.h"
@@ -33,6 +35,10 @@ public:
 	virtual void DrawActors();
 	virtual void UpdateFace (int damage=0) {}
 	virtual void WeaponGrin () {}
+	virtual void InfoMessage(FString key,
+			const std::vector<FTextureID> &texids = std::vector<FTextureID>()) {}
+	virtual void ClearInfoMessages() {}
+	virtual bool ShowWithoutKey() const { return false; }
 };
 extern DBaseStatusBar *StatusBar;
 void	CreateStatusBar();
@@ -155,14 +161,22 @@ extern class player_t
 			{
 			}
 		};
-		TArray<WeaponSlotState> weaponSlotStates;
+		// this is enough entries for bt_slot0, ..., bt_slot9
+		using TWeaponSlotStates = std::array<WeaponSlotState, 10>;
+		TWeaponSlotStates weaponSlotStates;
+
+		struct LastBob
+		{
+			int		dir = 0;
+			bool	step = false;
+			fixed	value = 0;
+			bool    inhibitstep = false;
+		};
+		LastBob		lastbob;
 
 		WeaponSlotState &GetWeaponSlotState (unsigned int slot)
 		{
-			TArray<WeaponSlotState> &v = weaponSlotStates;
-			if (slot >= v.Size())
-				v.Resize(slot + 1);
-			return v[slot];
+			return weaponSlotStates[slot];
 		}
 } players[];
 

@@ -62,6 +62,7 @@ public:
 
 	int		TitleTime;
 	FString	BorderFlat;
+	FString	BorderPic;
 	FString ArmorIcon1;
 	FString ArmorIcon2;
 	fixed   Armor2Percent;
@@ -77,9 +78,11 @@ public:
 	FString	IntermissionMusic;
 	FString	HighScoresFont;
 	FString	AdvisoryPic;
+	FString	AuthorCreditPic;
 	FString FinaleFlat;
 	FString GameOverPic;
 	FString VictoryPic;
+	FString GameLanguage;
 	FString PageIndexText;
 	// Special stack for strings like the default translator.
 	// This will allow the previous default to be included.
@@ -104,6 +107,7 @@ public:
 	FName	DoorSoundSequence;
 	FName	PushwallSoundSequence;
 	fixed	GibFactor;
+	fixed	DropItemTileSize;
 
 	TArray<FName>	PlayerClasses;
 	TArray<FString>	QuitMessages;
@@ -159,6 +163,7 @@ public:
 	} automap;
 	int parallaxskyfloorcolor;
 	int parallaxskyceilcolor;
+	int walldecalcolor;
 } gameinfo;
 
 class LevelInfo
@@ -178,6 +183,7 @@ public:
 	unsigned int	Cluster;
 	FString			Translator;
 	FTextureID		TitlePatch;
+	FString			BlakeHeading;
 
 	FTextureID		BorderTexture;
 	FTextureID		DefaultTexture[2];
@@ -196,7 +202,8 @@ public:
 	bool			ForceShowPsyched;
 	TArray<FTextureID>	ParallaxSky;
 	int             NumParallaxTiles;
-	int             Atmos[4];
+	bool			ParallaxDecals;
+	int             Atmos[5];
 	FString			Intermission;
 
 	bool			DeathCam;
@@ -208,6 +215,10 @@ public:
 
 	TArray<const ClassDef *>	EnsureInventory;
 
+	FName           FadeCMapName;
+	bool            FullBrightInhibit;
+	const BYTE      *CMapStart;
+
 	struct SpecialAction
 	{
 	public:
@@ -216,10 +227,32 @@ public:
 		int				Args[5];
 	};
 	TArray<SpecialAction>	SpecialActions;
+	FName					FootSplash;
 
 	void ClearAtmos()
 	{
-		Atmos[0] = Atmos[1] = Atmos[2] = Atmos[3] = 0;
+		Atmos[0] = Atmos[1] = Atmos[2] = Atmos[3] = Atmos[4] = 0;
+	}
+
+	// Returns true when any star sky is enabled such as Star sky and HQ Star
+	// sky. Returns false otherwise
+	bool StarSkyEnabled() const
+	{
+		return Atmos[0] || Atmos[3];
+	}
+
+	// Returns true when any sky is enabled such as Parallax sky, Star sky, HQ
+	// Star sky. Returns false otherwise
+	bool SkyEnabled() const
+	{
+		return ParallaxSky.Size() > 0 || StarSkyEnabled();
+	}
+
+	// Returns true when any snow is enabled such as regular Snow and HQ Snow.
+	// Returns false otherwise
+	bool SnowEnabled() const
+	{
+		return Atmos[2] || Atmos[4];
 	}
 
 	static LevelInfo &Find(const char* level);

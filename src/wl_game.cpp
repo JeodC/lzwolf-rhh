@@ -254,6 +254,7 @@ void UpdateSoundLoc(void)
 				channelSoundPos[i].globalsoundy,
 				channelSoundPos[i].attenuation);
 			SD_SetPosition(i, leftchannel, rightchannel, channeldist);
+			SD_SetChannelVolume (i, channelSoundPos[i].volume);
 		}
 	}
 }
@@ -305,6 +306,10 @@ void SetupGameLevel (void)
 	}
 
 	gamestate.faceframe.SetInvalid();
+
+#ifdef USE_GPL
+	bibendovsky::level_initialize();
+#endif
 
 //
 // load the level
@@ -703,6 +708,7 @@ void Died (void)
 	}
 
 	SD_PlaySound ("player/death");
+	StatusBar->ClearInfoMessages();
 
 	//
 	// swing around to face attacker
@@ -796,6 +802,7 @@ void Died (void)
 			VL_FadeOut(0, 255, 0, 0, 0, 64);
 	}
 
+	LoopedAudio::stopActiveSounds();
 	SD_WaitSoundDone ();
 
 	if ((players[0].lives > -1) || (gamestate.difficulty->LivesCount < 0))
@@ -973,6 +980,8 @@ restartgame:
 				dointermission = !levelInfo->NoIntermission;
 				forceshowpsyched = levelInfo->ForceShowPsyched;
 
+				LoopedAudio::stopActiveSounds();
+
 				FString next;
 				if(playstate != ex_newmap)
 				{
@@ -1086,6 +1095,7 @@ restartgame:
 
 			case ex_warped:
 				players[0].state = player_t::PST_ENTER;
+				LoopedAudio::stopActiveSounds();
 				break;
 
 			default:
@@ -1128,8 +1138,9 @@ namespace LoopedAudio
 
 	inline FArchive &operator<< (FArchive &arc, Chan &x)
 	{
-		arc << x.channel
-			<< x.sound
+		if (arc.IsLoading())
+			x.channel = -1;
+		arc << x.sound
 			<< x.attenuation
 			<< x.volume;
 		return arc;
@@ -1182,12 +1193,19 @@ namespace LoopedAudio
 
 	void updateSoundPos (void)
 	{
+		std::map<unsigned int, AActor *> actors;
+		for(AActor::Iterator iter = AActor::GetIterator();iter.Next();)
+		{
+			AActor * const ob = iter;
+			actors[ob->spawnid] = ob;
+		}
+
 		typedef int FadeLevel;
 		typedef std::map<FadeLevel, ChanMap::iterator> FLMap;
 		FLMap flm;
 		for (ChanMap::iterator it = chans.begin(); it != chans.end(); ++it)
 		{
-			AActor *ob = ActorSpawnID::Actors[it->first];
+			AActor *ob = actors[it->first];
 			Chan &chan = it->second;
 			flm[tileDist(ob, players[0].mo)] = it;
 		}
@@ -1197,12 +1215,12 @@ namespace LoopedAudio
 		for (closestCounter = (int)flm.size() - 1, it2 = flm.rbegin(); it2 != flm.rend(); ++it2, --closestCounter)
 		{
 			ChanMap::iterator it = it2->second;
-			AActor *ob = ActorSpawnID::Actors[it->first];
+			AActor *ob = actors[it->first];
 			Chan &chan = it->second;
 
 			// group 2 has 2 channels only
 			// so stop looped audio from objects too distant
-			if (closestCounter >= 2)
+			if (closestCounter >= 2 || (MusicMode == smm_Off && chan.volume < 0))
 			{
 				if (chan.channel != -1)
 				{
@@ -1236,7 +1254,7 @@ namespace LoopedAudio
 		for (ChanMap::const_iterator it = chans.begin();
 			it != chans.end(); ++it)
 		{
-			AActor *ob = ActorSpawnID::Actors[it->first];
+			AActor *ob = actors[it->first];
 			const Chan &chan = it->second;
 
 			if (chan.channel != -1)
@@ -1248,12 +1266,12 @@ namespace LoopedAudio
 		}
 	}
 
-	void stopSoundFrom (ObjId objId)
+	void stopSoundFrom (ObjId objId, bool halt_only)
 	{
-		ChanMap::const_iterator it = chans.find(objId);
+		ChanMap::iterator it = chans.find(objId);
 		if (it != chans.end())
 		{
-			const Chan &chan = it->second;
+			Chan &chan = it->second;
 
 			if (chan.channel != -1)
 			{
@@ -1263,14 +1281,52 @@ namespace LoopedAudio
 					soundpos->valid = 0;
 					Mix_HaltChannel(chan.channel);
 				}
+
+				if(halt_only)
+					chan.channel = -1;
 			}
 
-			chans.erase(objId);
+			if(!halt_only)
+				chans.erase(objId);
+		}
+	}
+
+	void setVolume (ObjId objId, double volume)
+	{
+		ChanMap::iterator it = chans.find(objId);
+		if (it != chans.end())
+		{
+			Chan &chan = it->second;
+
+			if (chan.channel != -1)
+			{
+				chan.volume = volume;
+
+				globalsoundpos *soundpos = &channelSoundPos[chan.channel];
+				if (soundpos->valid)
+				{
+					soundpos->volume = volume;
+					SD_SetChannelVolume (chan.channel, volume);
+				}
+			}
 		}
 	}
 
 	void Serialize(FArchive &arc)
 	{
 		arc << chans;
+	}
+
+	void stopActiveSounds (bool halt_only)
+	{
+		std::set<ObjId> obj_ids;
+		for(auto it = std::begin(chans); it != std::end(chans); ++it)
+		{
+			obj_ids.insert(std::begin(obj_ids), it->first);
+		}
+		for(auto id: obj_ids)
+			stopSoundFrom(id, halt_only);
+		if(!halt_only)
+			chans.clear();
 	}
 }

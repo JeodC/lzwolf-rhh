@@ -52,7 +52,34 @@
 		if(sc.CheckToken('=')) {
 #define EndParseBlock \
 			else \
-				sc.GetNextToken(); \
+			{ \
+				if(sc.CheckToken(TK_BoolConst)) \
+				{ \
+					sc.ScriptMessage(Scanner::WARNING, \
+						"Invalid Bool field:%s = %s.\n", key.GetChars(), \
+						sc->boolean ? "true" : "false"); \
+				} \
+				else if(sc.CheckToken(TK_IntConst)) \
+				{ \
+					sc.ScriptMessage(Scanner::WARNING, \
+						"Invalid Int field:%s = %d.\n", key.GetChars(), \
+						sc->number); \
+				} \
+				else if(sc.CheckToken(TK_StringConst)) \
+				{ \
+					sc.ScriptMessage(Scanner::WARNING, \
+						"Invalid String field:%s = \"%s\".\n", key.GetChars(), \
+						sc->str.GetChars()); \
+				} \
+				else if(sc.CheckToken(TK_FloatConst)) \
+				{ \
+					sc.ScriptMessage(Scanner::WARNING, \
+						"Invalid Float field:%s = %.3f.\n", key.GetChars(), \
+						sc->decimal); \
+				} \
+				else \
+					sc.GetNextToken(); \
+			} \
 			sc.MustGetToken(';'); \
 		} else \
 			sc.ScriptMessage(Scanner::ERROR, "Invalid syntax.\n"); \
@@ -143,6 +170,31 @@ void TextMapParser::ParseTile(Scanner &sc, MapTile &tile)
 	{
 		sc.MustGetToken(TK_BoolConst);
 		tile.showSky = sc->boolean;
+	}
+	else CheckKey("switchtextureeast")
+	{
+		sc.MustGetToken(TK_StringConst);
+		tile.switchTextureEast = sc->str;
+	}
+	else CheckKey("bright")
+	{
+		sc.MustGetToken(TK_BoolConst);
+		tile.bright = sc->boolean;
+	}
+	else CheckKey("decal")
+	{
+		sc.MustGetToken(TK_BoolConst);
+		tile.decal = sc->boolean;
+	}
+	else CheckKey("slidestyle")
+	{
+		sc.MustGetToken(TK_IntConst);
+		tile.slideStyle = sc->number;
+	}
+	else CheckKey("textureflip")
+	{
+		sc.MustGetToken(TK_BoolConst);
+		tile.textureFlip = sc->boolean;
 	}
 
 	EndParseBlock
@@ -250,15 +302,29 @@ void TextMapParser::ParseTrigger(Scanner &sc, MapTrigger &trigger)
 		sc.MustGetToken(TK_BoolConst);
 		trigger.monsterUse = sc->boolean;
 	}
+	else CheckKey("monsterusefilter")
+	{
+		trigger.monsterUseFilter = MustGetSignedInteger(sc);
+	}
 	else CheckKey("repeatable")
 	{
 		sc.MustGetToken(TK_BoolConst);
 		trigger.repeatable = sc->boolean;
 	}
+	else CheckKey("infoMessage")
+	{
+		sc.MustGetToken(TK_StringConst);
+		trigger.infoMessage = sc->str;
+	}
 	else CheckKey("secret")
 	{
 		sc.MustGetToken(TK_BoolConst);
 		trigger.isSecret = sc->boolean;
+	}
+	else CheckKey("onspawnaction")
+	{
+		sc.MustGetToken(TK_StringConst);
+		trigger.onSpawnAction = sc->str;
 	}
 
 	EndParseBlock
@@ -267,7 +333,24 @@ void TextMapParser::ParseTrigger(Scanner &sc, MapTrigger &trigger)
 void TextMapParser::ParseZone(Scanner &sc, MapZone &zone)
 {
 	StartParseBlock
-	if(false);
+	CheckKey("hintareanum")
+	{
+		sc.MustGetToken(TK_IntConst);
+		zone.hintareanum = sc->number;
+	}
+	EndParseBlock
+}
+
+void TextMapParser::ParseLightSector(Scanner &sc, MapLightSector &lightsector)
+{
+	StartParseBlock
+
+	CheckKey("light")
+	{
+		sc.MustGetToken(TK_IntConst);
+		lightsector.light = sc->number;
+	}
+
 	EndParseBlock
 }
 
@@ -363,6 +446,8 @@ class UWMFParser : public TextMapParser
 						ParseSector();
 					else CheckKey("zone")
 						ParseZone();
+					else CheckKey("lightsector")
+						ParseLightSector();
 					else CheckKey("plane")
 						ParsePlane();
 					else CheckKey("thing")
@@ -404,6 +489,9 @@ class UWMFParser : public TextMapParser
 					plane.map[j].zone =
 						pdata[j].zone < 0 || (unsigned)pdata[j].zone >= gm->zonePalette.Size()
 						? NULL : &gm->zonePalette[pdata[j].zone];
+					plane.map[j].lightsector =
+						pdata[j].lightsector < 0 || (unsigned)pdata[j].lightsector >= gm->lightSectorPalette.Size()
+						? NULL : &gm->lightSectorPalette[pdata[j].lightsector];
 
 					if(pdata[j].tag)
 						gm->SetSpotTag(&plane.map[j], pdata[j].tag);
@@ -439,9 +527,18 @@ class UWMFParser : public TextMapParser
 				sc.MustGetToken(',');
 				pdata[i].zone = MustGetSignedInteger(sc);
 				if(sc.CheckToken(','))
+				{
 					pdata[i].tag = MustGetSignedInteger(sc);
+					if(sc.CheckToken(','))
+						pdata[i].lightsector = MustGetSignedInteger(sc);
+					else
+						pdata[i].lightsector = 0;
+				}
 				else
+				{
 					pdata[i].tag = 0;
+					pdata[i].lightsector = 0;
+				}
 				sc.MustGetToken('}');
 				if(++i != size)
 					sc.MustGetToken(',');
@@ -484,9 +581,29 @@ class UWMFParser : public TextMapParser
 				sc.MustGetToken(TK_StringConst);
 				sector.texture[MapSector::Ceiling] = TexMan.GetTexture(sc->str, FTexture::TEX_Flat);
 			}
+			else CheckKey("footsplash")
+			{
+				sc.MustGetToken(TK_StringConst);
+				sector.footSplash = sc->str;
+			}
 
 			EndParseBlock
 			gm->sectorPalette.Push(sector);
+		}
+
+		void ParseLightSector()
+		{
+			MapLightSector lightsector;
+			StartParseBlock
+
+			CheckKey("light")
+			{
+				sc.MustGetToken(TK_IntConst);
+				lightsector.light = sc->number;
+			}
+
+			EndParseBlock
+			gm->lightSectorPalette.Push(lightsector);
 		}
 
 		void ParseThing()
@@ -618,6 +735,7 @@ class UWMFParser : public TextMapParser
 			int sector;
 			int zone;
 			int tag;
+			int lightsector;
 		};
 
 		GameMap * const gm;

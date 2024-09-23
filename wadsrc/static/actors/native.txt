@@ -2,9 +2,11 @@ const int CHF_DONTDODGE = 1;
 const int CHF_BACKOFF = 2;
 const int CHF_NOSIGHTCHECK = 4;
 const int CHF_NOPLAYACTIVE = 8;
+const int CHF_PATHING = 16;
 
 const int CMF_AIMOFFSET = 1;
 const int CMF_AIMDIRECTION = 2;
+const int CMF_PROJHITENEMY = 4;
 
 const int CPF_USEAMMO = 1;
 const int CPF_ALWAYSPLAYSOUND = 2;
@@ -19,6 +21,8 @@ const int GAF_NOAMMO = 2;
 const int GAF_MACDAMAGE = 4;
 
 const int SXF_TRANSFERPOINTERS = 1;
+const int SXF_PROJHITENEMY = 2;
+const int SXF_CLIPMAPBOUNDS = 4;
 
 const int ASP_CHASE = 3;
 
@@ -59,10 +63,30 @@ const float ATTN_NORM = 1.0; // vanilla
 const float ATTN_IDLE = 1.001; // vanilla with added distance attenuation
 const float ATTN_STATIC = 3.0; // diminish very rapidly with distance
 
+const int PRB_100 = 256;
+const int PRB_50 = 128;
+
+const int TARGET_AUTO = 0;
+const int TARGET_PLAYER = 1;
+
+const int OWNER_SELF = 0;
+const int OWNER_TARGET = 1;
+const int OWNER_PLAYER = 2;
+
+// A_SetProperty target
+const int PRT_SELF = 1;
+const int PRT_READYWEAPON = 2;
+
+// Spot vision flags
+const int SVI_FAILCHECKLINE = 0x01;
+const int SVI_FAILCHECKSIDE = 0x02;
+const int SVI_FAILALL = SVI_FAILCHECKLINE|SVI_FAILCHECKSIDE;
+
 actor Actor native
 {
 	actionns "lz"
 	damage 0
+	damagefactor 1.0
 	radius 20
 	height 16
 	health 1000
@@ -76,18 +100,23 @@ actor Actor native
 	projectilepassheight -1
 	singlespawn 0
 	loaded 0
+	zoneindex 0
+	patrolfilterkey 0
+	flipsprite 0
 
 	native angle_t angle;
 	native int health;
 	native int loaded;
+	native int zoneindex;
 
 	action native A_ActiveSound(int chance=256);
-	action native A_AlertMonsters();
+	action native A_AlertMonsters(int noise=1);
+	action native A_AmbientJumpState(state frame, bool enter);
 	action native A_BossDeath();
 	action native A_CallSpecial(int special, int arg1=0, int arg2=0, int arg3=0, int arg4=0, int arg5=0);
 	action native A_ChangeFlag(string flag, bool value);
 	action native A_ChangeVelocity(float x, float y, float z, int flags = 0);
-	action native A_Chase(state melee="*", state ranged="*", int flags = 0);
+	action native A_Chase(state melee="*", state ranged="*", int flags = 0, float minseedist = 0, float maxseedist = 0, float maxheardist = 0, float fov = 180);
 	action native A_CustomMissile(string missiletype, float spawnheight = 32, int spawnoffset = 0, float angle = 0, int aimflags = 0);
 	action native A_Dormant(state frame = "See", int flags = 0);
 	action native A_EnableHaloLight(int id, bool enabled);
@@ -96,16 +125,16 @@ actor Actor native
 	action native A_FaceTarget(float max_turn = 0, float max_pitch = 270);
 	action native A_Fall();
 	action native A_GiveExtraMan(int amount = 1);
-	action native A_GiveInventory(string type, int amount = 0);
+	action native A_GiveInventory(string type, int amount = 0, int owner = OWNER_SELF);
 	action native A_InertMove(float move, int dir);
 	action native A_Jump(int chance, state frame, ...);
 	action native A_JumpIf(bool expression, state frame);
-	action native A_JumpIfCloser(float distance, state frame);
-	action native A_JumpIfInventory(string type, int amount, state frame);
+	action native A_JumpIfCloser(float distance, state frame, int target=TARGET_AUTO);
+	action native A_JumpIfInventory(string type, int amount, state frame, int owner = OWNER_SELF);
 	action native A_Look(int flags = 0, float minseedist = 0, float maxseedist = 0, float maxheardist = 0, float fov = 180, state frame = "*");
 	action native A_LookEx(int flags = 0, float minseedist = 0, float maxseedist = 0, float maxheardist = 0, float fov = 180, state frame = "*"); // Alias
 	action native A_MeleeAttack(int damage, float accuracy = 0.6275, string hitsound = "", string misssound = "*");
-	action native A_MirrorPosition(float mirx);
+	action native A_MirrorPosition(float mirx, int axis = 0);
 	action native A_MonsterRefire(int chance, state abort);
 	action native A_Pain();
 	action native A_PlaySound(string soundname, int slot = CHAN_BODY, float volume = 1.0, bool looping = false, float attenuation = ATTN_NORM);
@@ -114,14 +143,20 @@ actor Actor native
 	action native A_ScaleVelocity(float scale);
 	action native A_Scream();
 	action native A_SelectWeapon(int slot);
+	action native A_SetHealth(int health);
+	action native A_SetIntegerProperty(string propName, int value);
 	action native A_SetPicXY(int picX, int picY);
-	action native A_SetProperty(string propName, auto value);
+	action native A_SetProperty(string propName, auto value, int target = PRT_SELF);
+	action native A_SetSpotVisionByTag(int tag, bool allow, int flags = SVI_FAILALL);
 	action native A_SetTics(float duration);
+	action native A_SetVolume(float volume);
 	action native A_SpawnItem(string type, float distance = 0, float zheight = 0);
 	action native A_SpawnItemEx(string type, float xoffset = 0, float yoffset = 0, float zoffset = 0, float xvel = 0, float yvel = 0, float zvel = 0, float angle = 0, int flags = 0, int failchance = 0);
+	action native A_StartMusic(string song);
 	action native A_Stop();
 	action native A_StopSound(int slot = CHAN_VOICE);	// Bad default but that's what is originally was...
 	action native A_TakeInventory(string type, int amount);
+	action native A_UpdateZoneIndex();
 	action native A_Wander();
 	action native A_WolfAttack(int flags = 0, string sound = "*", float snipe = 1.0, int maxdamage = 64, int blocksize = 128, int pointblank = 2, int longrange = 4, float runspeed = 160.0);
 
@@ -160,6 +195,20 @@ actor Armor : Inventory native
 	inventory.pickupsound "misc/armor_pkup"
 }
 
+actor Barrier native
+{
+	action native A_InitBarrierAnim(int delay);
+	action native A_BarrierAnimDelay();
+	action native A_BarrierLink();
+	action native A_BarrierSpawn();
+	action native A_BarrierTransition();
+}
+
+actor BarrierLinker native
+{
+	singlespawn 1
+}
+
 actor BasicArmor : Armor native
 {
 	//+inventory.KEEPDEPLETED
@@ -182,6 +231,12 @@ actor BasicArmorPickup : Armor native
 
 actor BackpackItem : Inventory native
 {
+}
+
+actor Collateral native
+{
+	collateral.hitradius 32.0
+	collateral.hitchance 100
 }
 
 actor CustomInventory : Inventory native
@@ -236,6 +291,13 @@ actor ScoreItem : Inventory native
 	inventory.amount 1
 }
 
+actor CoinItem : Inventory native
+{
+	inventory.amount 1
+	inventory.maxamount 25
+	inventory.pickupsound "misc/foodtoken"
+}
+
 actor Weapon : Inventory native
 {
 	inventory.pickupsound "misc/w_pkup"
@@ -280,6 +342,7 @@ actor PlayerPawn native
 	player.sidemove 1, 1
 	player.maxhealth 100
 	player.movebob 1.0
+	player.movebobspeed 1.0
 	player.damagescreencolor "FF 00 00"
 	+SOLID
 	+SHOOTABLE
@@ -302,6 +365,56 @@ actor SwitchableDecoration native
 
 actor SwitchingDecoration : SwitchableDecoration native
 {
+}
+
+// Ambient: Ambient sounds -------------------------------------------------
+
+actor Ambient native
+{
+	states
+	{
+		Spawn:
+			TNT1 A 30
+		Check:
+			TNT1 A 70 A_AmbientJumpState("Start", true)
+			loop
+
+		Start:
+			TNT1 A 70 A_PlaySound("guard/sight", CHAN_AUTO, 0.2, true, ATTN_NONE)
+			goto StartLevel1
+		End:
+			TNT1 A 70 A_SetVolume(0.8)
+			goto EndLevel1
+			
+		StartLevel1:
+			TNT1 A 70 A_SetVolume(0.4)
+			goto StartLevel2
+		StartLevel2:
+			TNT1 A 70 A_SetVolume(0.6)
+			goto StartLevel3
+		StartLevel3:
+			TNT1 A 70 A_SetVolume(0.8)
+			goto StartLevel4
+		StartLevel4:
+			TNT1 A 70 A_SetVolume(1.0)
+			goto WaitEnd
+		WaitEnd:
+			TNT1 A 70 A_AmbientJumpState("End", false)
+			loop
+
+		EndLevel1:
+			TNT1 A 70 A_SetVolume(0.6)
+			goto EndLevel2
+		EndLevel2:
+			TNT1 A 70 A_SetVolume(0.4)
+			goto EndLevel3
+		EndLevel3:
+			TNT1 A 70 A_SetVolume(0.2)
+			goto EndLevel4
+		EndLevel4:
+			TNT1 A 70 A_StopSound
+			goto Check
+	}
 }
 
 // Random spawner ----------------------------------------------------------

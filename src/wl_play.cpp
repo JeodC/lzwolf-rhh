@@ -47,7 +47,7 @@
 =============================================================================
 */
 
-bool madenoise;              // true when shooting or screaming
+int madenoise;              // true when shooting or screaming
 
 exit_t playstate;
 gameaction_t gameaction;
@@ -58,8 +58,9 @@ extern bool ShadowingEnabled;
 #endif
 
 bool noclip, ammocheat, mouselook = false;
-int godmode, singlestep;
-bool notargetmode = false;
+int singlestep;
+CVAR(Int, godmode, 0, CVAR_ARCHIVE)
+CVAR(Bool, notargetmode, false, CVAR_ARCHIVE)
 unsigned int extravbls = 0; // to remove flicker (gray stuff at the bottom)
 
 //
@@ -204,8 +205,14 @@ void CalcTics()
 //
 // calculate tics since last refresh for adaptive timing
 //
-	if (lasttimecount > GetTimeCount())
-		ResetTimeCount(); // if the game was paused a LONG time
+
+	// Have we arrived too soon?
+	while(lasttimecount == GetTimeCount()+1)
+		SDL_Delay(1);
+
+	// Detect rollover, particularly if the game were paused for a LONG time
+	if(lasttimecount > GetTimeCount())
+		ResetTimeCount();
 
 	uint32_t curtime = SDL_GetTicks();
 	tics = (curtime * 7) / 100 - lasttimecount;
@@ -1082,6 +1089,8 @@ void PlayLoop (void)
 	playstate = ex_stillplaying;
 	ResetTimeCount();
 	frameon = 0;
+	moveobj_frameon = 0;
+	projectile_frameon = 0;
 	funnyticount = 0;
 	memset (control[ConsolePlayer].buttonstate, 0, sizeof (control[ConsolePlayer].buttonstate));
 	ClearPaletteShifts ();
@@ -1110,7 +1119,7 @@ void PlayLoop (void)
 //
 // actor thinking
 //
-		madenoise = false;
+		madenoise = std::max(madenoise-1,0);
 
 		// Run tics
 		if(Paused & 2)
@@ -1128,6 +1137,7 @@ void PlayLoop (void)
 			{
 				PollControls(!i);
 
+				++frameon;
 				++gamestate.TimeCount;
 				thinkerList->Tick();
 				AActor::FinishSpawningActors();
@@ -1143,8 +1153,6 @@ void PlayLoop (void)
 
 		if(automap && !gamestate.victoryflag)
 			BasicOverhead();
-
-		C_DrawConsole(false);
 
 		//
 		// MAKE FUNNY FACE IF BJ DOESN'T MOVE FOR AWHILE
@@ -1169,6 +1177,8 @@ void PlayLoop (void)
 			if ((gamestate.TimeCount & 1) || !(tics & 1))
 				StatusBar->DrawStatusBar();
 		}
+
+		C_DrawConsole(false);
 
 		VH_UpdateScreen();
 //

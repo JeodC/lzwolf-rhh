@@ -74,8 +74,10 @@ const struct FlagDef
 	DEFINE_FLAG(WF, ALWAYSGRIN, Weapon, weaponFlags),
 	DEFINE_FLAG(IF, ALWAYSPICKUP, Inventory, itemFlags),
 	DEFINE_FLAG(FL, AMBUSH, Actor, flags),
+	DEFINE_FLAG(FL, ATTACKMODE, Actor, flags),
 	DEFINE_FLAG(IF, AUTOACTIVATE, Inventory, itemFlags),
 	DEFINE_FLAG(FL, BILLBOARD, Actor, flags),
+	DEFINE_FLAG(FL, BLAKEPATROL, Actor, extraflags),
 	DEFINE_FLAG(FL, BRIGHT, Actor, flags),
 	DEFINE_FLAG(FL, CANUSEWALLS, Actor, flags),
 	DEFINE_FLAG(FL, COUNTITEM, Actor, flags),
@@ -86,21 +88,27 @@ const struct FlagDef
 	DEFINE_FLAG(FL, DRAWRELATIVE, Actor, flags),
 	DEFINE_FLAG(FL, DROPBASEDONTARGET, Actor, flags),
 	DEFINE_FLAG(FL, ENEMYSOLID, Actor, extraflags),
+	DEFINE_FLAG(FL, FRIENDLY, Actor, extraflags),
+	DEFINE_FLAG(FL, IGNOREENEMYSOLID, Actor, extraflags),
 	DEFINE_FLAG(IF, INVBAR, Inventory, itemFlags),
 	DEFINE_FLAG(FL, ISMONSTER, Actor, flags),
 	DEFINE_FLAG(FL, MISSILE, Actor, flags),
+	DEFINE_FLAG(FL, MUSTATTACK, Actor, extraflags),
 	DEFINE_FLAG(WF, NOALERT, Weapon, weaponFlags),
 	DEFINE_FLAG(WF, NOAUTOFIRE, Weapon, weaponFlags),
 	DEFINE_FLAG(WF, NOGRIN, Weapon, weaponFlags),
 	DEFINE_FLAG(FL, OLDRANDOMCHASE, Actor, flags),
 	DEFINE_FLAG(FL, PICKUP, Actor, flags),
 	DEFINE_FLAG(FL, PLOTONAUTOMAP, Actor, flags),
+	DEFINE_FLAG(FL, PROJHITENEMY, Actor, extraflags),
 	DEFINE_FLAG(FL, RANDOMIZE, Actor, flags),
+	DEFINE_FLAG(FL, RANDOMTURN, Actor, extraflags),
 	DEFINE_FLAG(FL, REQUIREKEYS, Actor, flags),
 	DEFINE_FLAG(FL, RIPPER, Actor, flags),
 	DEFINE_FLAG(FL, SHOOTABLE, Actor, flags),
 	DEFINE_FLAG(FL, SOLID, Actor, flags),
-	DEFINE_FLAG(FL, STATUSBAR, Actor, flags)
+	DEFINE_FLAG(FL, STATUSBAR, Actor, flags),
+	DEFINE_FLAG(FL, TRYTURN180, Actor, extraflags)
 };
 extern const PropDef properties[];
 
@@ -472,7 +480,8 @@ bool ClassDef::bShutdown = false;
 // Minimize warning spam for deprecated feature in 1.4
 static bool g_ThingEdNumWarning;
 
-ClassDef::ClassDef() : tentative(false)
+ClassDef::ClassDef() : DamageFactors(nullptr), FullBrightInhibit(false),
+	CMapStart(nullptr), tentative(false), filterposRunningId(0)
 {
 	defaultInstance = NULL;
 	FlatPointers = Pointers = NULL;
@@ -487,6 +496,8 @@ ClassDef::~ClassDef()
 	}
 	for(unsigned int i = 0;i < symbols.Size();++i)
 		delete symbols[i];
+	if (DamageFactors != nullptr)
+		delete DamageFactors;
 }
 
 TMap<FName, ClassDef *> &ClassDef::ClassTable()
@@ -842,6 +853,7 @@ void ClassDef::InstallStates(const TArray<StateDefinition> &stateDefs)
 			thisFrame->duration = thisStateDef.duration;
 			thisFrame->randDuration = thisStateDef.randDuration;
 			thisFrame->fullbright = thisStateDef.fullbright;
+			thisFrame->zonebright = thisStateDef.zonebright;
 			thisFrame->offsetX = thisStateDef.offsetX;
 			thisFrame->offsetY = thisStateDef.offsetY;
 			thisFrame->action = thisStateDef.functions[0];
@@ -1145,6 +1157,23 @@ static int ParseThingActivation (Scanner &sc)
 
 //==========================================================================
 
+struct ParsePropertyNoComma
+{
+	void Set()
+	{
+		flag = true;
+	}
+
+	bool Clear()
+	{
+		const auto res = flag;
+		flag = false;
+		return res;
+	}
+
+	bool flag = false;
+};
+
 bool ClassDef::SetProperty(AActor* actor, const ClassDef *cls, const char* propName, const char* value)
 {
 	Scanner sc( value, strlen(value) );
@@ -1221,6 +1250,8 @@ bool ClassDef::SetProperty(ClassDef *newClass, const char* className, const char
 			unsigned int paramc = 0;
 			if(*p != 0)
 			{
+				ParsePropertyNoComma nocomma;
+
 				do
 				{
 					if(*p != 0)
@@ -1284,6 +1315,16 @@ bool ClassDef::SetProperty(ClassDef *newClass, const char* className, const char
 								}
 								params[paramc].f = (negate ? -1 : 1) * sc->decimal;
 								break;
+
+							case 'Z':	// an optional string. Does not allow any numerical value.
+								if (sc.CheckToken(TK_FloatConst))
+								{
+									nocomma.Set();
+									sc.Rewind();
+									break;
+								}
+								// fall through
+
 							case 'S':
 								if(!optional)
 									sc.MustGetToken(TK_StringConst);
@@ -1324,7 +1365,7 @@ bool ClassDef::SetProperty(ClassDef *newClass, const char* className, const char
 					else
 						sc.GetNextToken();
 				}
-				while(sc.CheckToken(','));
+				while(nocomma.Clear() || sc.CheckToken(','));
 			}
 			if(!optional && *p != 0 && *p != '_')
 				sc.ScriptMessage(Scanner::ERROR, "Not enough parameters.");
@@ -1399,6 +1440,13 @@ void ClassDef::UnloadActors()
 	AActor::damageExpressions.Clear();
 	for(unsigned int i = 0;i < globalSymbols.Size();++i)
 		delete globalSymbols[i];
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+int ClassDef::GetNextFilterposId()
+{
+    return filterposRunningId++;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

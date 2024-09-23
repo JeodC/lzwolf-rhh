@@ -36,11 +36,13 @@
 #include "actor.h"
 #include "thingdef.h"
 #include "a_inventory.h"
+#include "a_ambient.h"
 #include "a_playerpawn.h"
 #include "scanner.h"
 #include "thingdef/thingdef_type.h"
 #include "thingdef/thingdef_expression.h"
 #include "v_video.h"
+#include "r_data/colormaps.h"
 
 #define IS_EXPR(no) params[no].isExpression
 #define EXPR_PARAM(var, no) ExpressionNode *var = params[no].expr;
@@ -140,6 +142,13 @@ HANDLE_PROPERTY(backpackmaxamount)
 	((AAmmo*)defaults)->Backpackmaxamount = maxamount;
 }
 
+HANDLE_PROPERTY(blakeautochargephase)
+{
+	INT_PARAM(phase, 0);
+	((AWeapon*)defaults)->DrawAmmoMsg = (phase >= 1);
+	((AWeapon*)defaults)->WeaponWait = (phase == 2);
+}
+
 HANDLE_PROPERTY(bobrangex)
 {
 	FIXED_PARAM(rangex, 0);
@@ -208,6 +217,28 @@ HANDLE_PROPERTY(damage)
 	{
 		EXPR_PARAM(dmg, 0);
 		cls->Meta.SetMetaInt(AMETA_Damage, AActor::damageExpressions.Push(dmg));
+	}
+}
+
+HANDLE_PROPERTY(damagefactor)
+{
+	STRING_PARAM(str, 0);
+	FIXED_PARAM(id, 1);
+
+	if (str == NULL)
+	{
+		defaults->DamageFactor = id;
+	}
+	else
+	{
+		FName dmgType;
+		if (!stricmp(str, "Normal")) dmgType = NAME_None;
+		else dmgType=str;
+
+		if(cls->DamageFactors == nullptr)
+			cls->DamageFactors = new DmgFactors;
+
+		(*cls->DamageFactors)[ dmgType.GetChars() ] = id;
 	}
 }
 
@@ -307,6 +338,75 @@ HANDLE_PROPERTY(faction)
 		defaults->faction = ClassDef::FindClassTentative(type, NATIVE_CLASS(Faction));
 }
 
+HANDLE_PROPERTY(fadecmap)
+{
+	STRING_PARAM(str, 0);
+	cls->FadeCMapName = FName(str);
+	const DWORD colormapnum = R_ColormapNumForName(str);
+	cls->CMapStart = (colormapnum != 0 ? 
+		&realcolormaps[colormapnum*256*NUMCOLORMAPS] : nullptr);
+}
+
+HANDLE_PROPERTY(filterposthrust)
+{
+	INT_PARAM(axis, 0);
+	INT_PARAM(src, 1);
+
+	if(cls->Meta.GetMetaInt(AMETA_FilterposThrusts, -1) == -1 || cls->Meta.IsInherited(AMETA_FilterposThrusts))
+		cls->Meta.SetMetaInt(AMETA_FilterposThrusts, AActor::filterposThrusts.Push(new AActor::FilterposThrustList()));
+
+	AActor::FilterposThrust filterposThrust;
+	filterposThrust.id = cls->GetNextFilterposId();
+	filterposThrust.axis = axis;
+	filterposThrust.src = (FilterposThrustSource::e)src;
+
+	AActor::filterposThrusts[cls->Meta.GetMetaInt(AMETA_FilterposThrusts)]->Push(filterposThrust);
+}
+
+HANDLE_PROPERTY(filterposwave)
+{
+	INT_PARAM(axis, 0);
+	FLOAT_PARAM(amplitude, 1);
+	FLOAT_PARAM(period, 2);
+	INT_PARAM(usesine, 3);
+
+	if(cls->Meta.GetMetaInt(AMETA_FilterposWaves, -1) == -1 || cls->Meta.IsInherited(AMETA_FilterposWaves))
+		cls->Meta.SetMetaInt(AMETA_FilterposWaves, AActor::filterposWaves.Push(new AActor::FilterposWaveList()));
+
+	AActor::FilterposWave filterposWave;
+	filterposWave.id = cls->GetNextFilterposId();
+	filterposWave.axis = axis;
+	filterposWave.amplitude = amplitude;
+	filterposWave.period = period;
+	filterposWave.usesine = usesine;
+
+	AActor::filterposWaves[cls->Meta.GetMetaInt(AMETA_FilterposWaves)]->Push(filterposWave);
+}
+
+HANDLE_PROPERTY(filterposwrap)
+{
+	FLOAT_PARAM(x1, 0);
+	FLOAT_PARAM(x2, 1);
+	INT_PARAM(axis, 2);
+
+	if(cls->Meta.GetMetaInt(AMETA_FilterposWraps, -1) == -1 || cls->Meta.IsInherited(AMETA_FilterposWraps))
+		cls->Meta.SetMetaInt(AMETA_FilterposWraps, AActor::filterposWraps.Push(new AActor::FilterposWrapList()));
+
+	AActor::FilterposWrap filterposWrap;
+	filterposWrap.id = cls->GetNextFilterposId();
+	filterposWrap.x1 = x1;
+	filterposWrap.x2 = x2;
+	filterposWrap.axis = axis;
+
+	AActor::filterposWraps[cls->Meta.GetMetaInt(AMETA_FilterposWraps)]->Push(filterposWrap);
+}
+
+HANDLE_PROPERTY(flipsprite)
+{
+	INT_PARAM(flip, 0);
+	defaults->FlipSprite = !!flip;
+}
+
 HANDLE_PROPERTY(forwardmove)
 {
 	FIXED_PARAM(forwardmove1, 0);
@@ -318,6 +418,12 @@ HANDLE_PROPERTY(forwardmove)
 		FIXED_PARAM(forwardmove2, 1);
 		player->forwardmove[1] = forwardmove2;
 	}
+}
+
+HANDLE_PROPERTY(fullbrightinhibit)
+{
+	INT_PARAM(inhibit, 0);
+	cls->FullBrightInhibit = !!inhibit;
 }
 
 HANDLE_PROPERTY(gibhealth)
@@ -340,6 +446,13 @@ HANDLE_PROPERTY(halolight)
 	haloLight.id = id;
 	haloLight.radius = radius;
 	haloLight.light = light;
+	haloLight.littype = nullptr;
+
+	if (PARAM_COUNT == 4)
+	{
+		STRING_PARAM(littype, 3);
+		haloLight.littype = ClassDef::FindClassTentative(littype, NATIVE_CLASS(Lit));
+	}
 
 	AActor::haloLights[cls->Meta.GetMetaInt(AMETA_HaloLights)]->Push(haloLight);
 }
@@ -376,6 +489,24 @@ HANDLE_PROPERTY(height)
 	// For forwards compatibility solid actors should have a height of 64
 }
 
+HANDLE_PROPERTY(hitchance)
+{
+	INT_PARAM(value, 0);
+	((ACollateral*)defaults)->HitChance = value;
+}
+
+HANDLE_PROPERTY(hitobituary)
+{
+	STRING_PARAM(str, 0);
+	cls->Meta.SetMetaString (AMETA_HitObituary, str);
+}
+
+HANDLE_PROPERTY(hitradius)
+{
+	FLOAT_PARAM(value, 0);
+	((ACollateral*)defaults)->HitRadius = value*FRACUNIT/64;
+}
+
 HANDLE_PROPERTY(icon)
 {
 	STRING_PARAM(icon, 0);
@@ -389,10 +520,65 @@ HANDLE_PROPERTY(ignorearmor)
 	((ADamage *)defaults)->ignorearmor = ignorearmor?true:false;
 }
 
+HANDLE_PROPERTY(infomessage)
+{
+	STRING_PARAM(str, 0);
+	cls->Meta.SetMetaString(AMETA_InfoMessage, str);
+}
+
 HANDLE_PROPERTY(interhubamount)
 {
 	INT_PARAM(amt, 0);
 	((AInventory *)defaults)->interhubamount = amt;
+}
+
+HANDLE_PROPERTY(interrogate)
+{
+	STRING_PARAM(infoMessage, 0);
+	STRING_PARAM(dropItem, 1);
+	INT_PARAM(prb, 2);
+
+	int amtmin, amtmax;
+	INT_PARAM(minAmount, 3);
+	amtmin = minAmount;
+
+	if(PARAM_COUNT == 5)
+	{
+		INT_PARAM(maxAmount, 4);
+		amtmax = maxAmount;
+	}
+	else
+	{
+		amtmax = amtmin;
+	}
+
+	if(cls->Meta.GetMetaInt(AMETA_InterrogateItems, -1) == -1 || cls->Meta.IsInherited(AMETA_InterrogateItems))
+		cls->Meta.SetMetaInt(AMETA_InterrogateItems, AActor::interrogateItems.Push(new AActor::InterrogateItemList()));
+
+	AActor::InterrogateItem interrogateItem;
+	interrogateItem.infoMessage = infoMessage;
+	interrogateItem.dropItem = dropItem;
+
+	if(prb > 255)
+		prb = 255;
+	else if(prb < 0)
+		prb = 0;
+	interrogateItem.probability = prb;
+	interrogateItem.minAmount = amtmin;
+	interrogateItem.maxAmount = amtmax;
+
+	auto pit = AActor::interrogateItems[cls->Meta.GetMetaInt(AMETA_InterrogateItems)];
+	interrogateItem.id = pit->Size();
+	pit->Push(interrogateItem);
+}
+
+HANDLE_PROPERTY(litfilter)
+{
+	STRING_PARAM(type, 0);
+	if(stricmp(type, "none") == 0 || *type == '\0')
+		defaults->litfilter = NULL;
+	else
+		defaults->litfilter = ClassDef::FindClassTentative(type, NATIVE_CLASS(Lit));
 }
 
 HANDLE_PROPERTY(loaded)
@@ -509,6 +695,13 @@ HANDLE_PROPERTY(movebob)
 	cls->Meta.SetMetaFixed(APMETA_MoveBob, strength);
 }
 
+HANDLE_PROPERTY(movebobspeed)
+{
+	FIXED_PARAM(speed, 0);
+
+	cls->Meta.SetMetaFixed(APMETA_MoveBobSpeed, speed);
+}
+
 HANDLE_PROPERTY(noxdeath)
 {
 	INT_PARAM(noxdeath, 0);
@@ -533,12 +726,6 @@ HANDLE_PROPERTY(obituary)
 	cls->Meta.SetMetaString (AMETA_Obituary, str);
 }
 
-HANDLE_PROPERTY(hitobituary)
-{
-	STRING_PARAM(str, 0);
-	cls->Meta.SetMetaString (AMETA_HitObituary, str);
-}
-
 HANDLE_PROPERTY(overheadicon)
 {
 	STRING_PARAM(icon, 0);
@@ -549,6 +736,24 @@ HANDLE_PROPERTY(painsound)
 {
 	STRING_PARAM(snd, 0);
 	defaults->painsound = snd;
+}
+
+HANDLE_PROPERTY(patroldeferchange)
+{
+	INT_PARAM(defer, 0);
+	((APatrolPoint*)defaults)->DeferChange = !!defer;
+}
+
+HANDLE_PROPERTY(patrolfilterkey)
+{
+	INT_PARAM(key, 0);
+	defaults->PatrolFilterKey = key;
+}
+
+HANDLE_PROPERTY(patroltargetstate)
+{
+	STRING_PARAM(str, 0);
+	((APatrolPoint*)defaults)->TargetState = str;
 }
 
 HANDLE_PROPERTY(pickupmessage)
@@ -748,6 +953,12 @@ HANDLE_PROPERTY(startitem)
 	APlayerPawn::startInventory[cls->Meta.GetMetaInt(APMETA_StartInventory)]->Push(drop);
 }
 
+HANDLE_PROPERTY(usetriggerfilterkey)
+{
+	INT_PARAM(key, 0);
+	defaults->UseTriggerFilterKey = key;
+}
+
 HANDLE_PROPERTY(viewheight)
 {
 	FIXED_PARAM(height, 0);
@@ -779,6 +990,12 @@ HANDLE_PROPERTY(yadjust)
 	def->yadjust = adjust;
 }
 
+HANDLE_PROPERTY(zoneindex)
+{
+	INT_PARAM(zoneindex, 0);
+	defaults->zoneindex = zoneindex;
+}
+
 HANDLE_PROPERTY(zonelight)
 {
 	INT_PARAM(id, 0);
@@ -790,6 +1007,13 @@ HANDLE_PROPERTY(zonelight)
 	AActor::ZoneLight zoneLight;
 	zoneLight.id = id;
 	zoneLight.light = light;
+	zoneLight.littype = nullptr;
+
+	if (PARAM_COUNT == 3)
+	{
+		STRING_PARAM(littype, 2);
+		zoneLight.littype = ClassDef::FindClassTentative(littype, NATIVE_CLASS(Lit));
+	}
 
 	AActor::zoneLights[cls->Meta.GetMetaInt(AMETA_ZoneLights)]->Push(zoneLight);
 }
@@ -832,12 +1056,14 @@ extern const PropDef properties[] =
 	DEFINE_PROP(backpackamount, Ammo, I),
 	DEFINE_PROP(backpackboostamount, Ammo, I),
 	DEFINE_PROP(backpackmaxamount, Ammo, I),
+	DEFINE_PROP(blakeautochargephase, Weapon, I),
 	DEFINE_PROP(bobrangex, Weapon, F),
 	DEFINE_PROP(bobrangey, Weapon, F),
 	DEFINE_PROP(bobspeed, Weapon, F),
 	DEFINE_PROP(bobstyle, Weapon, S),
 	DEFINE_PROP(conversationid, Actor, I),
 	DEFINE_PROP(damage, Actor, I),
+	DEFINE_PROP(damagefactor, Actor, ZF),
 	DEFINE_PROP(damageresistance, Actor, S_I),
 	DEFINE_PROP_PREFIX(damagescreencolor, Actor, Player, S),
 	DEFINE_PROP(damagetype, Actor, S),
@@ -846,15 +1072,26 @@ extern const PropDef properties[] =
 	DEFINE_PROP(dropitem, Actor, S_II),
 	DEFINE_PROP(enemyfaction, Actor, S),
 	DEFINE_PROP(faction, Actor, S),
+	DEFINE_PROP(fadecmap, Actor, S),
+	DEFINE_PROP(filterposthrust, Actor, II),
+	DEFINE_PROP(filterposwave, Actor, IFFI),
+	DEFINE_PROP(filterposwrap, Actor, FFI),
+	DEFINE_PROP(flipsprite, Actor, I),
 	DEFINE_PROP_PREFIX(forwardmove, PlayerPawn, Player, F_F),
+	DEFINE_PROP(fullbrightinhibit, Actor, I),
 	DEFINE_PROP(gibhealth, Actor, I),
 	DEFINE_PROP(halolight, Actor, IFI_S),
 	DEFINE_PROP(health, Actor, I_IIIIIIII),
 	DEFINE_PROP(height, Actor, I),
+	DEFINE_PROP(hitchance, Collateral, I),
 	DEFINE_PROP(hitobituary, Actor, T),
+	DEFINE_PROP(hitradius, Collateral, F),
 	DEFINE_PROP(icon, Inventory, S),
 	DEFINE_PROP(ignorearmor, Damage, I),
+	DEFINE_PROP(infomessage, Actor, T),
 	DEFINE_PROP(interhubamount, Inventory, I),
+	DEFINE_PROP(interrogate, Actor, TSII_I),
+	DEFINE_PROP(litfilter, Actor, S),
 	DEFINE_PROP(loaded, Actor, I),
 	DEFINE_PROP(maxabsorb, Armor, I),
 	DEFINE_PROP(maxamount, Inventory, I),
@@ -869,11 +1106,15 @@ extern const PropDef properties[] =
 	DEFINE_PROP(missilefrequency, Actor, F),
 	DEFINE_PROP(MONSTER, Actor,),
 	DEFINE_PROP_PREFIX(movebob, PlayerPawn, Player, F),
+	DEFINE_PROP_PREFIX(movebobspeed, PlayerPawn, Player, F),
 	DEFINE_PROP(noxdeath, Damage, I),
 	DEFINE_PROP(obituary, Actor, T),
 	DEFINE_PROP(overheadicon, Actor, S),
 	DEFINE_PROP(painchance, Actor, I),
 	DEFINE_PROP(painsound, Actor, S),
+	DEFINE_PROP(patroldeferchange, PatrolPoint, I),
+	DEFINE_PROP(patrolfilterkey, Actor, I),
+	DEFINE_PROP(patroltargetstate, PatrolPoint, S),
 	DEFINE_PROP(pickupmessage, Inventory, T),
 	DEFINE_PROP(pickupsound, Inventory, S),
 	DEFINE_PROP(points, Actor, I),
@@ -895,12 +1136,14 @@ extern const PropDef properties[] =
 	DEFINE_PROP(speed, Actor, F_F),
 	DEFINE_PROP_PREFIX(startitem, PlayerPawn, Player, S_I),
 	DEFINE_PROP(STATUSBAR, Actor,),
+	DEFINE_PROP(usetriggerfilterkey, Actor, I),
 	DEFINE_PROP_PREFIX(viewheight, PlayerPawn, Player, F),
 	DEFINE_PROP_PREFIX(weaponslot, PlayerPawn, Player, IS_SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS),
 	DEFINE_PROP(xscale, Actor, F),
 	DEFINE_PROP(yadjust, Weapon, F),
 	DEFINE_PROP(yscale, Actor, F),
-	DEFINE_PROP(zonelight, Actor, II),
+	DEFINE_PROP(zoneindex, Actor, I),
+	DEFINE_PROP(zonelight, Actor, II_S),
 
 	{ NULL, NULL, NULL, NULL }
 };
