@@ -12,10 +12,10 @@ Like ZDoom, LZWolf aims to support all games which use the Wolfenstein 3D engine
 * This is actually based on the Wolf3D engine instead of a recreation or forcing into a more modern engine.
     * Software rendered using the same 8-bit ray casting.
     
-## PortMaster Changes
+## Port Changes
 
-PM-LZWolf stays true to the original source with exception to the available resolutions. Since PortMaster is generally used with small-arm handhelds, with lower cpu and memory power, the ultra widescreen resolutions are not necessary. In addition, some custom resolutions
-were missing. These can all be viewed and modified at the [sdlvideo.cpp](https://github.com/JeodC/pm-lzwolf/blob/main/src/sdlvideo.cpp#L383) file.
+LZWolf-RHH stays true to the original source with exception to the available resolutions. Since PortMaster is generally used with small-arm handhelds, with lower cpu and memory power, the ultra widescreen resolutions are not necessary. In addition, some custom resolutions
+were missing. These can all be viewed and modified at the sdlvideo.cpp file.
 
 ## Custom Features
 
@@ -38,8 +38,8 @@ LZWolf supports features not necessarily present in the official ECWolf project.
     
 ## Compiling
 ```
-git clone https://github.com/JeodC/pm-lzwolf
-cd pm-lzwolf
+git clone https://github.com/JeodC/lzwolf-rhh
+cd lzwolf-rhh
 mkdir build && cd build
 cmake ..
 make
