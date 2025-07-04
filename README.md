@@ -1,6 +1,4 @@
-# LZWolf - PortMaster Fork
-
-## LZWolf
+# LZWolf
 
 LZWolf is a fork of Blzut3's ECWolf project. It still combines the original Wolfenstein 3D engine with the user experience of ZDoom to create the most user and mod author friendly Wolf3D source port.
 
